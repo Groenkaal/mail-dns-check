@@ -22,14 +22,46 @@
   ];
   var MS_DKIM_SELECTORS = ["selector1", "selector2"];
   var MS_DKIM_SUFFIXES = [".onmicrosoft.com", ".dkim.mail.microsoft"];
-  var COMMON_SELECTORS = [
-    "selector1", "selector2", "google",
-    "default", "dkim", "mail", "email", "smtp", "mx", "key1", "key2", "dk",
-    "k1", "k2", "k3", "s1", "s2", "zoho", "zmail",
-    "protonmail", "protonmail2", "protonmail3", "fm1", "fm2", "fm3", "sig1",
-    "hs1", "hs2", "mandrill", "mxvault", "everlytickey1", "everlytickey2",
-    "zendesk1", "zendesk2", "kl", "kl2"
+  // Common selectors in check order, with who typically uses them.
+  var SELECTOR_INFO = [
+    ["selector1", "Microsoft 365", "Primary key. Published as a CNAME to Microsoft."],
+    ["selector2", "Microsoft 365", "Rotation key. Can sit without a key between rotations."],
+    ["google", "Google Workspace", "Default selector when DKIM is turned on in the Admin console."],
+    ["default", "Generic", "Default on many web hosts and control panels (cPanel, Plesk)."],
+    ["dkim", "Generic", "Common name on self-hosted mail servers."],
+    ["mail", "Generic / Yandex", "Yandex default; also common on self-hosted servers."],
+    ["email", "Generic", "Common custom name."],
+    ["smtp", "Generic / Mailgun", "Older Mailgun setups and self-hosted relays."],
+    ["mx", "Mailgun", "Mailgun's default selector for many domains."],
+    ["key1", "Generic", "Numbered keys used by some hosts and ESPs."],
+    ["key2", "Generic", "Second numbered key for rotation."],
+    ["dk", "Generic", "Short name, often left over from DomainKeys."],
+    ["k1", "Mailchimp", "Mailchimp's main selector."],
+    ["k2", "Mailchimp / Mandrill", "Additional Mailchimp key."],
+    ["k3", "Mailchimp / Mandrill", "Additional Mailchimp key."],
+    ["s1", "SendGrid", "SendGrid domain authentication, first key."],
+    ["s2", "SendGrid", "SendGrid domain authentication, second key."],
+    ["zoho", "Zoho Mail", "Zoho Mail default."],
+    ["zmail", "Zoho Mail", "Alternative Zoho selector."],
+    ["protonmail", "Proton Mail", "Proton custom-domain key 1."],
+    ["protonmail2", "Proton Mail", "Proton custom-domain key 2."],
+    ["protonmail3", "Proton Mail", "Proton custom-domain key 3."],
+    ["fm1", "Fastmail", "Fastmail key 1."],
+    ["fm2", "Fastmail", "Fastmail key 2."],
+    ["fm3", "Fastmail", "Fastmail key 3."],
+    ["sig1", "iCloud Mail", "iCloud+ custom email domains."],
+    ["hs1", "HubSpot", "HubSpot email sending domain, key 1."],
+    ["hs2", "HubSpot", "HubSpot email sending domain, key 2."],
+    ["mandrill", "Mandrill", "Mailchimp Transactional (Mandrill)."],
+    ["mxvault", "Hosted mail", "Used by some hosted mail services."],
+    ["everlytickey1", "Everlytic", "Everlytic key 1."],
+    ["everlytickey2", "Everlytic", "Everlytic key 2."],
+    ["zendesk1", "Zendesk", "Zendesk support mail, key 1."],
+    ["zendesk2", "Zendesk", "Zendesk support mail, key 2."],
+    ["kl", "Klaviyo", "Klaviyo dedicated sending domain, key 1."],
+    ["kl2", "Klaviyo", "Klaviyo dedicated sending domain, key 2."]
   ];
+  var COMMON_SELECTORS = SELECTOR_INFO.map(function (x) { return x[0]; });
   var SPF_LOOKUP_LIMIT = 10;
   var SEVERITY = { pass: 0, info: 0, warn: 1, fail: 2 };
   var TYPE_NUM = { TXT: 16, MX: 15, CNAME: 5 };
@@ -372,7 +404,8 @@
   }
 
   var api = { createResolver: createResolver, checkDomain: checkDomain, parseDomainList: parseDomainList,
-    parseSelectorList: parseSelectorList, lookupTenant: lookupTenant, commonSelectorCount: COMMON_SELECTORS.length };
+    parseSelectorList: parseSelectorList, lookupTenant: lookupTenant, commonSelectorCount: COMMON_SELECTORS.length,
+    selectorInfo: SELECTOR_INFO.map(function (x) { return { name: x[0], usedBy: x[1], note: x[2] }; }) };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.MailDnsChecks = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

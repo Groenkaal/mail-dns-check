@@ -94,6 +94,28 @@ input[type="text"] {
   background: var(--code-bg); border: 1px solid var(--rule); border-radius: 3px; padding: 8px 12px;
 }
 input[type="text"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sel-label { display: flex; align-items: center; gap: 8px; }
+.help {
+  display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%;
+  font: 600 0.75rem/1 var(--font-body); text-decoration: none;
+  color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent);
+}
+.help:hover { background: var(--accent); color: var(--accent-ink); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.sel-list { max-width: 720px; }
+.sel-list summary { cursor: pointer; font-size: var(--step--1); color: var(--accent); width: fit-content; }
+.sel-list summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sel-body { display: grid; gap: 10px; padding-top: 10px; }
+.sel-intro { font-size: var(--step--1); color: var(--ink-soft); max-width: 68ch; }
+.sel-scroll { max-height: 320px; overflow: auto; border: 1px solid var(--rule); border-radius: 3px; }
+.sel-table { width: 100%; border-collapse: collapse; font-size: var(--step--1); min-width: 480px; }
+.sel-table th, .sel-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.sel-table thead th { position: sticky; top: 0; background: var(--code-bg); }
+.sel-table tbody tr:last-child td { border-bottom: 0; }
+.sel-table td:first-child { font-family: var(--font-mono); white-space: nowrap; }
+.sel-table td:nth-child(2) { white-space: nowrap; font-weight: 500; }
+.sel-table td:last-child { color: var(--ink-soft); }
+.sel-doc { font-size: var(--step--1); width: fit-content; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
 .btn {
   font: 600 var(--step-0) var(--font-body); border-radius: 3px; cursor: pointer;
@@ -216,8 +238,24 @@ body.only-issues [data-overall="pass"] { display: none; }
     <label class="label" for="domains">Domains, one per line or comma-separated</label>
     <textarea id="domains" spellcheck="false" autocapitalize="off" placeholder="contoso.com&#10;fabrikam.com"></textarea>
     <div class="sel-row">
-      <label class="label" for="selectors">Extra DKIM selectors <span class="opt">optional</span></label>
+      <div class="sel-label">
+        <label class="label" for="selectors">Extra DKIM selectors <span class="opt">optional</span></label>
+        <a class="help" href="automation.html#selectors" title="Selectors in scripts and automations">?<span class="visually-hidden"> How to use selectors in scripts and automations</span></a>
+      </div>
       <input type="text" id="selectors" spellcheck="false" autocapitalize="off" placeholder="e.g. mycorp2024, s2025">
+      <details class="sel-list" id="sel-list">
+        <summary>Selector list: the <span class="sel-n">36</span> checked by default</summary>
+        <div class="sel-body">
+          <p class="sel-intro">Every check looks for a DKIM key at these selectors. Add yours above if it isn't here. You can find it as the <span class="mono">s=</span> tag in the <span class="mono">DKIM-Signature</span> header of a message you sent.</p>
+          <div class="sel-scroll">
+            <table class="sel-table">
+              <thead><tr><th class="label">Selector</th><th class="label">Used by</th><th class="label">Notes</th></tr></thead>
+              <tbody id="sel-rows"></tbody>
+            </table>
+          </div>
+          <a class="sel-doc" href="automation.html#selectors">Use selectors in scripts and automations</a>
+        </div>
+      </details>
     </div>
     <div class="actions">
       <button class="btn primary" type="submit" id="run">Check domains</button>
@@ -262,16 +300,16 @@ body.only-issues [data-overall="pass"] { display: none; }
 
   <footer>
     <div>Overall status is the worst of SPF, DKIM and DMARC. MX only fails a domain when no MX exists. DNS can't list DKIM selectors, so a key under a custom selector only shows up if you add that selector. The Microsoft 365 tenant comes from Microsoft's public sign-in metadata.</div>
-    <div>Link to a check with <span class="mono">?d=contoso.com,fabrikam.com</span> (add <span class="mono">&amp;s=selector</span> for extra selectors). Prefer a script? The same checks run as Python and PowerShell in the <a href="https://github.com/Groenkaal/mail-dns-check">mail-dns-check repo</a>.</div>
+    <div>Link to a check with <span class="mono">?d=contoso.com,fabrikam.com</span> (add <span class="mono">&amp;s=selector</span> for extra selectors). See <a href="automation.html">automation</a> for scripts, schedules and CI. Prefer a script? The same checks run as Python and PowerShell in the <a href="https://github.com/Groenkaal/mail-dns-check">mail-dns-check repo</a>.</div>
   </footer>
 </div>
 
 <!-- Bump ?v= whenever checks.js changes, so browsers never pair a new page with a cached old script. -->
-<script src="checks.js?v=3"></script>
+<script src="checks.js?v=4"></script>
 <script>
 (function () {
   "use strict";
-  if (!window.MailDnsChecks || !window.MailDnsChecks.parseSelectorList) {
+  if (!window.MailDnsChecks || !window.MailDnsChecks.selectorInfo) {
     var st = document.getElementById("status");
     st.textContent = "The page loaded an outdated copy of its check script. Reload the page (Ctrl+F5) to fix this.";
     st.className = "status error";
@@ -482,6 +520,15 @@ body.only-issues [data-overall="pass"] { display: none; }
 
   // ------------------------------------------------------------ start
   $("sel-count").textContent = String(MailDnsChecks.commonSelectorCount);
+  document.querySelector(".sel-n").textContent = String(MailDnsChecks.commonSelectorCount);
+  var selRows = $("sel-rows");
+  MailDnsChecks.selectorInfo.forEach(function (x) {
+    var tr = el("tr");
+    tr.appendChild(el("td", null, x.name));
+    tr.appendChild(el("td", null, x.usedBy));
+    tr.appendChild(el("td", null, x.note));
+    selRows.appendChild(tr);
+  });
   if (window.MAILDNS_SAMPLE) {
     var s = window.MAILDNS_SAMPLE;
     ta.value = s.domains.map(function (d) { return d.domain; }).join("\n");

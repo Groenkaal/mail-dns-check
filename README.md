@@ -18,6 +18,8 @@ Checks MX, SPF, DKIM and DMARC for a list of domains and writes an HTML report. 
 
 Paste domains or load a `.txt` file. Lookups run in the browser over DNS-over-HTTPS (dns.google, falling back to Cloudflare). Link straight to a check with `?d=contoso.com,fabrikam.com` (add `&s=mycorp2024` for extra selectors). **Download report** saves the same HTML report the scripts produce.
 
+Scripts, scheduled tasks, cron, GitHub Actions and reading report results: **https://groenkaal.github.io/mail-dns-check/automation.html**
+
 ## Run locally
 
 Each script asks where to save the report. Press Enter to save it in the current folder with a timestamped name.

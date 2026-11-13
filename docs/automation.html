@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mail DNS Check Automation</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Run Mail DNS Check from scripts, scheduled tasks, cron and GitHub Actions, with custom DKIM selectors.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&display=swap">
+<style>
+/* Layout: a reference page. Contents list on top, then one section per way of running the check, each with copyable code. */
+:root {
+  --ground: #f3f5f6;
+  --sheet: #ffffff;
+  --ink: #17232b;
+  --ink-soft: #55656f;
+  --rule: #d9e0e4;
+  --accent: #0e5a7e;
+  --accent-ink: #ffffff;
+  --code-bg: #eef2f4;
+  --warn: #8a5a00;  --warn-bg: #fbefd6;
+
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+  --step-3: 2.125rem;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0f161b; --sheet: #172128; --ink: #e3eaee; --ink-soft: #93a4ae; --rule: #2a3843;
+    --accent: #5fb4dc; --accent-ink: #0b1418; --code-bg: #0f181e;
+    --warn: #f0bf5a; --warn-bg: #3a2c0f;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0f161b; --sheet: #172128; --ink: #e3eaee; --ink-soft: #93a4ae; --rule: #2a3843;
+  --accent: #5fb4dc; --accent-ink: #0b1418; --code-bg: #0f181e;
+  --warn: #f0bf5a; --warn-bg: #3a2c0f;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 var(--step-0)/1.6 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 860px; margin: 0 auto; padding-block: 32px 72px; display: grid; gap: 36px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 700; margin: 0; text-wrap: balance; line-height: 1.15; }
+p, ul, ol { margin: 0; }
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.label { font-size: var(--step--1); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+code, .mono { font-family: var(--font-mono); font-size: 0.875em; }
+p code, li code, td code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; overflow-wrap: anywhere; }
+
+header.top { display: grid; gap: 12px; border-bottom: 2px solid var(--ink); padding-bottom: 18px; }
+header.top .back { font-size: var(--step--1); width: fit-content; }
+header.top h1 { font-size: var(--step-3); letter-spacing: -0.01em; }
+header.top h1 span { color: var(--accent); }
+header.top p { color: var(--ink-soft); max-width: 68ch; }
+
+nav.toc { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: var(--step--1); }
+nav.toc a { text-decoration: none; font-weight: 500; }
+nav.toc a:hover { text-decoration: underline; }
+
+section { display: grid; gap: 14px; scroll-margin-top: 16px; }
+section > h2 { font-size: var(--step-2); padding-top: 4px; border-top: 1px solid var(--rule); padding-top: 22px; }
+section h3 { font-size: var(--step-1); margin-top: 6px; }
+section > p, section > ul, section > ol { max-width: 68ch; }
+ul, ol { padding-left: 1.3em; display: grid; gap: 4px; }
+
+.code { position: relative; background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; }
+.code .lang { position: absolute; top: 8px; left: 12px; font: 600 0.6875rem/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+.code pre {
+  margin: 0; padding: 30px 14px 14px; overflow-x: auto;
+  font: 400 0.8125rem/1.6 var(--font-mono); color: var(--ink); tab-size: 2;
+}
+.code .copy {
+  position: absolute; top: 6px; right: 6px;
+  font: 500 0.75rem var(--font-body); color: var(--ink-soft); background: var(--code-bg);
+  border: 1px solid var(--rule); border-radius: 3px; padding: 3px 9px; cursor: pointer;
+}
+.code .copy:hover { color: var(--ink); border-color: var(--ink-soft); }
+
+.table-scroll { overflow-x: auto; background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; }
+table { width: 100%; border-collapse: collapse; font-size: var(--step--1); min-width: 520px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+thead th { background: var(--code-bg); }
+tbody tr:last-child td { border-bottom: 0; }
+
+.note { font-size: var(--step--1); padding: 10px 14px; border-radius: 3px; background: var(--warn-bg); color: var(--ink); max-width: 68ch; }
+
+footer { font-size: var(--step--1); color: var(--ink-soft); border-top: 1px solid var(--rule); padding-top: 14px; }
+@media (max-width: 720px) { header.top h1 { font-size: var(--step-2); } }
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="back" href="./">&larr; Back to Mail DNS Check</a>
+    <div class="label">Docs</div>
+    <h1>Mail DNS Check <span>Automation</span></h1>
+    <p>Run the same MX, SPF, DKIM and DMARC checks from scripts, scheduled tasks and CI. Each run writes an HTML report with the results embedded as JSON, so a job can read them and act on failures.</p>
+  </header>
+
+  <nav class="toc" aria-label="Contents">
+    <a href="#selectors">DKIM selectors</a>
+    <a href="#links">Web links</a>
+    <a href="#python">Python</a>
+    <a href="#powershell">PowerShell</a>
+    <a href="#schedule">Scheduled runs</a>
+    <a href="#github-actions">GitHub Actions</a>
+    <a href="#results">Reading results</a>
+  </nav>
+
+  <section id="selectors">
+    <h2>DKIM selectors</h2>
+    <p>DNS can't list a domain's DKIM selectors, so every check looks for keys at a fixed list of common selectors, plus any you add. The full list with who uses each one is under <a href="./#sel-list">Selector list</a> on the main page.</p>
+
+    <h3>Find your selector</h3>
+    <ul>
+      <li>Open a message sent from the domain and view its headers. The <code>DKIM-Signature</code> header has an <code>s=</code> tag, for example <code>s=mycorp2024</code>. That value is the selector.</li>
+      <li><strong>Microsoft 365</strong> always uses <code>selector1</code> and <code>selector2</code>. These are already checked.</li>
+      <li><strong>Google Workspace</strong> shows the selector under Admin console &rarr; Apps &rarr; Google Workspace &rarr; Gmail &rarr; Authenticate email. The default is <code>google</code>.</li>
+      <li>Sending services (SendGrid, Mailchimp, HubSpot and others) show their selectors on the DNS records page for your domain.</li>
+    </ul>
+
+    <h3>Add selectors</h3>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="label">Where</th><th class="label">How</th><th class="label">Example</th></tr></thead>
+        <tbody>
+          <tr><td>Web page</td><td>Extra DKIM selectors field, or <code>s=</code> in the link</td><td><code>?d=contoso.com&amp;s=mycorp2024,s2025</code></td></tr>
+          <tr><td>Python</td><td><code>--selector</code> (<code>-s</code>), space or comma separated</td><td><code>--selector mycorp2024 s2025</code></td></tr>
+          <tr><td>PowerShell</td><td><code>-Selector</code>, comma separated</td><td><code>-Selector mycorp2024,s2025</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Keep selectors in a file</h3>
+    <p>For scheduled runs, keep your selectors in a text file next to <code>domains.txt</code>, one per line, and pass them in. Lines starting with <code>#</code> are skipped. The file needs at least one selector, or Python stops with a usage error.</p>
+    <div class="code"><span class="lang">Bash</span><pre><code>python3 python/check_mail_dns.py --domains domains.txt \
+  --selector $(grep -v '^#' selectors.txt) \
+  --output reports/mail-dns.html</code></pre></div>
+    <div class="code"><span class="lang">PowerShell</span><pre><code>$selectors = Get-Content .\selectors.txt | Where-Object { $_ -and $_ -notmatch '^#' }
+.\powershell\Check-MailDns.ps1 -Domains .\domains.txt -Selector $selectors -Output .\reports\mail-dns.html</code></pre></div>
+  </section>
+
+  <section id="links">
+    <h2>Web links</h2>
+    <p>The web page runs a check as soon as it opens with domains in the link. Use this in ticket templates, runbooks or monitoring dashboards.</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="label">Parameter</th><th class="label">Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>d</code> (or <code>domains</code>)</td><td>Domains to check, comma separated.</td></tr>
+          <tr><td><code>s</code></td><td>Extra DKIM selectors, comma separated.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="code"><span class="lang">URL</span><pre><code>https://groenkaal.github.io/mail-dns-check/?d=contoso.com,fabrikam.com&amp;s=mycorp2024</code></pre></div>
+    <p>The page runs in the viewer's browser, so it can't be called as an API. For unattended runs, use one of the scripts below.</p>
+  </section>
+
+  <section id="python">
+    <h2>Python</h2>
+    <p>Needs Python 3.9 or later and <code>dnspython</code>. Pass <code>--output</code> in automations; without it the script stops and asks where to save the report.</p>
+    <div class="code"><span class="lang">Bash</span><pre><code>git clone https://github.com/Groenkaal/mail-dns-check.git
+cd mail-dns-check
+pip install -r python/requirements.txt
+python3 python/check_mail_dns.py --domains domains.txt --output reports/mail-dns.html</code></pre></div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="label">Option</th><th class="label">Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>-d</code>, <code>--domains FILE</code></td><td>Domain list. Default: <code>domains.txt</code> in the repo root.</td></tr>
+          <tr><td><code>-D</code>, <code>--domain A B</code></td><td>Domains on the command line instead of a file.</td></tr>
+          <tr><td><code>-s</code>, <code>--selector A B</code></td><td>Extra DKIM selectors.</td></tr>
+          <tr><td><code>-o</code>, <code>--output FILE</code></td><td>Report path. Folders are created if needed.</td></tr>
+          <tr><td><code>-n</code>, <code>--nameserver IP</code></td><td>DNS server to use instead of the system resolver. Turns off the public-resolver retry for empty TXT answers.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The script exits with code 0 whenever it writes the report, whatever the results. To fail a job on bad results, read the report as shown in <a href="#results">Reading results</a>.</p>
+  </section>
+
+  <section id="powershell">
+    <h2>PowerShell</h2>
+    <p>Works in Windows PowerShell 5.1 and PowerShell 7. Pass <code>-Output</code> in automations so it doesn't stop to ask for a path.</p>
+    <div class="code"><span class="lang">PowerShell</span><pre><code>.\powershell\Check-MailDns.ps1 -Domains .\domains.txt -Selector mycorp2024 -Output C:\Reports\mail-dns.html</code></pre></div>
+    <h3>Run from GitHub without cloning</h3>
+    <p>The script downloads the report template from the repo. Replace <code>main</code> with a tag or commit hash for a version that won't change under you.</p>
+    <div class="code"><span class="lang">PowerShell</span><pre><code>& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Groenkaal/mail-dns-check/main/powershell/Check-MailDns.ps1))) -Domains .\domains.txt -Output .\mail-dns.html</code></pre></div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="label">Parameter</th><th class="label">Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>-Domains FILE</code></td><td>Domain list. Default: <code>domains.txt</code> in the repo root. Required when run from GitHub.</td></tr>
+          <tr><td><code>-Domain a.com,b.com</code></td><td>Domains on the command line instead of a file.</td></tr>
+          <tr><td><code>-Selector a,b</code></td><td>Extra DKIM selectors.</td></tr>
+          <tr><td><code>-Output FILE</code></td><td>Report path. Folders are created if needed.</td></tr>
+          <tr><td><code>-NameServer IP</code></td><td>DNS server for <code>Resolve-DnsName</code> (Windows only).</td></tr>
+          <tr><td><code>-TemplateUrl URL</code></td><td>Where to download the report template when it isn't on disk.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="schedule">
+    <h2>Scheduled runs</h2>
+    <h3>Windows Task Scheduler</h3>
+    <p>Weekly run every Monday at 07:00, writing a dated report. Run this once in an elevated PowerShell window.</p>
+    <div class="code"><span class="lang">PowerShell</span><pre><code>$script = 'C:\Tools\mail-dns-check\powershell\Check-MailDns.ps1'
+$taskArgs = "-NoProfile -ExecutionPolicy Bypass -Command `"&amp; '$script' -Domains 'C:\Tools\mail-dns-check\domains.txt' -Output ('C:\Reports\mail-dns-' + (Get-Date -Format yyyy-MM-dd) + '.html')`""
+$action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 7am
+Register-ScheduledTask -TaskName 'Mail DNS Check' -Action $action -Trigger $trigger</code></pre></div>
+    <h3>cron (Linux, macOS)</h3>
+    <p>Same schedule. In crontab, <code>%</code> has to be escaped as <code>\%</code>.</p>
+    <div class="code"><span class="lang">crontab</span><pre><code>0 7 * * 1  cd /opt/mail-dns-check &amp;&amp; python3 python/check_mail_dns.py --domains domains.txt --output reports/mail-dns-$(date +\%F).html</code></pre></div>
+  </section>
+
+  <section id="github-actions">
+    <h2>GitHub Actions</h2>
+    <p>Put this in <code>.github/workflows/mail-dns.yml</code> in a copy of the repo. It runs every Monday and on demand, saves the report as a downloadable artifact, and fails the run when any domain fails.</p>
+    <div class="code"><span class="lang">YAML</span><pre><code>name: Mail DNS check
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r python/requirements.txt
+      - name: Run checks
+        run: python python/check_mail_dns.py --domains domains.txt --selector mycorp2024 --output report/mail-dns-report.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mail-dns-report
+          path: report/
+      - name: Fail on failing domains
+        run: python scripts/read_report.py report/mail-dns-report.html</code></pre></div>
+    <p>Save the reader from <a href="#results">Reading results</a> as <code>scripts/read_report.py</code> for the last step. Leave that step out if you only want the report.</p>
+  </section>
+
+  <section id="results">
+    <h2>Reading results</h2>
+    <p>Every report embeds its results as JSON in <code>&lt;script id="report-data" type="application/json"&gt;</code>. Each domain has an <code>overall</code> status and one entry per check.</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th class="label">Field</th><th class="label">Contents</th></tr></thead>
+        <tbody>
+          <tr><td><code>domain</code></td><td>The domain checked.</td></tr>
+          <tr><td><code>overall</code></td><td><code>pass</code>, <code>warn</code> or <code>fail</code>: the worst of SPF, DKIM and DMARC, or <code>fail</code> when there is no MX.</td></tr>
+          <tr><td><code>provider</code></td><td>Mail provider found from MX, such as <code>Microsoft 365</code>, or <code>null</code>.</td></tr>
+          <tr><td><code>tenant</code></td><td><code>found</code>, plus <code>id</code> and <code>region</code> when the domain has a Microsoft 365 tenant.</td></tr>
+          <tr><td><code>checks.mx</code>, <code>.spf</code>, <code>.dkim</code>, <code>.dmarc</code></td><td>Each has <code>status</code> (<code>pass</code>, <code>warn</code>, <code>fail</code>, <code>info</code>), <code>summary</code>, <code>records</code> and <code>findings</code> (each with <code>level</code> and <code>text</code>).</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Python</h3>
+    <p>Prints one line per domain and exits with code 1 when any domain fails.</p>
+    <div class="code"><span class="lang">Python</span><pre><code>import json, re, sys
+
+html = open(sys.argv[1], encoding="utf-8").read()
+raw = re.search(r'&lt;script id="report-data" type="application/json"&gt;(.*?)&lt;/script&gt;', html, re.S).group(1)
+report = json.loads(raw)
+
+for d in report["domains"]:
+    c = d["checks"]
+    print(f'{d["domain"]:&lt;24} {d["overall"]:&lt;5} spf={c["spf"]["status"]} dkim={c["dkim"]["status"]} dmarc={c["dmarc"]["status"]}')
+
+failing = [d["domain"] for d in report["domains"] if d["overall"] == "fail"]
+if failing:
+    print("Failing:", ", ".join(failing))
+    sys.exit(1)</code></pre></div>
+    <h3>PowerShell</h3>
+    <div class="code"><span class="lang">PowerShell</span><pre><code>$html = Get-Content .\mail-dns.html -Raw -Encoding UTF8
+$json = [regex]::Match($html, '(?s)&lt;script id="report-data" type="application/json"&gt;(.*?)&lt;/script&gt;').Groups[1].Value
+$report = $json | ConvertFrom-Json
+
+$report.domains | Select-Object domain, overall,
+    @{ n = 'spf';   e = { $_.checks.spf.status } },
+    @{ n = 'dkim';  e = { $_.checks.dkim.status } },
+    @{ n = 'dmarc'; e = { $_.checks.dmarc.status } } | Format-Table
+
+if (@($report.domains | Where-Object overall -eq 'fail').Count) { exit 1 }</code></pre></div>
+  </section>
+
+  <footer>Source and issues: <a href="https://github.com/Groenkaal/mail-dns-check">github.com/Groenkaal/mail-dns-check</a></footer>
+</div>
+
+<script>
+(function () {
+  document.querySelectorAll(".code").forEach(function (box) {
+    var pre = box.querySelector("pre");
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "copy";
+    btn.textContent = "Copy";
+    btn.addEventListener("click", function () {
+      var text = pre.innerText;
+      var done = function (ok) {
+        btn.textContent = ok ? "Copied" : "Select and copy";
+        setTimeout(function () { btn.textContent = "Copy"; }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+      else done(false);
+    });
+    box.appendChild(btn);
+  });
+})();
+</script>
+</body>
+</html>
