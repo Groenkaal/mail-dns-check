@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mail DNS Report</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&display=swap">
+<style>
+/* Layout: a dense operations report. Summary matrix first, then one detail sheet per domain with the four checks in a 2x2 grid. */
+:root {
+  --ground: #f3f5f6;
+  --sheet: #ffffff;
+  --ink: #17232b;
+  --ink-soft: #55656f;
+  --rule: #d9e0e4;
+  --accent: #0e5a7e;
+  --code-bg: #eef2f4;
+
+  --pass: #1d7a46;  --pass-bg: #e3f3e9;
+  --warn: #8a5a00;  --warn-bg: #fbefd6;
+  --fail: #b3261e;  --fail-bg: #fbe4e2;
+  --info: #4a5d6b;  --info-bg: #e7edf1;
+
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+  --step-3: 2.125rem;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0f161b;
+    --sheet: #172128;
+    --ink: #e3eaee;
+    --ink-soft: #93a4ae;
+    --rule: #2a3843;
+    --accent: #5fb4dc;
+    --code-bg: #0f181e;
+    --pass: #6fd29a;  --pass-bg: #163526;
+    --warn: #f0bf5a;  --warn-bg: #3a2c0f;
+    --fail: #ff8f86;  --fail-bg: #43191a;
+    --info: #a9bac5;  --info-bg: #23313b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0f161b;
+  --sheet: #172128;
+  --ink: #e3eaee;
+  --ink-soft: #93a4ae;
+  --rule: #2a3843;
+  --accent: #5fb4dc;
+  --code-bg: #0f181e;
+  --pass: #6fd29a;  --pass-bg: #163526;
+  --warn: #f0bf5a;  --warn-bg: #3a2c0f;
+  --fail: #ff8f86;  --fail-bg: #43191a;
+  --info: #a9bac5;  --info-bg: #23313b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 var(--step-0)/1.55 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding-block: 32px 64px; display: grid; gap: 28px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 700; margin: 0; text-wrap: balance; line-height: 1.15; }
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.label {
+  font-size: var(--step--1); font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--ink-soft);
+}
+.mono { font-family: var(--font-mono); }
+
+/* Header */
+header.top { display: grid; gap: 14px; border-bottom: 2px solid var(--ink); padding-bottom: 18px; }
+header.top h1 { font-size: var(--step-3); letter-spacing: -0.01em; }
+header.top h1 span { color: var(--accent); }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 28px; font-size: var(--step--1); color: var(--ink-soft); }
+.meta b { color: var(--ink); font-weight: 500; font-family: var(--font-mono); }
+
+/* Tally + filter */
+.bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; }
+.tally { display: flex; flex-wrap: wrap; gap: 10px; }
+.tally div { display: flex; align-items: baseline; gap: 8px; padding: 6px 12px; border-radius: 4px; background: var(--sheet); border: 1px solid var(--rule); }
+.tally strong { font: 600 var(--step-2)/1 var(--font-display); font-variant-numeric: tabular-nums; }
+.tally .t-pass strong { color: var(--pass); }
+.tally .t-warn strong { color: var(--warn); }
+.tally .t-fail strong { color: var(--fail); }
+.filter { display: inline-flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; background: var(--sheet); }
+.filter button {
+  font: 500 var(--step--1) var(--font-body); color: var(--ink-soft);
+  background: transparent; border: 0; padding: 7px 14px; cursor: pointer;
+}
+.filter button + button { border-left: 1px solid var(--rule); }
+.filter button[aria-pressed="true"] { background: var(--ink); color: var(--sheet); }
+
+/* Pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 600 0.75rem/1 var(--font-body); letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pill.pass { color: var(--pass); background: var(--pass-bg); }
+.pill.warn { color: var(--warn); background: var(--warn-bg); }
+.pill.fail { color: var(--fail); background: var(--fail-bg); }
+.pill.info { color: var(--info); background: var(--info-bg); }
+
+/* Matrix */
+.matrix-scroll { overflow-x: auto; background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; }
+table.matrix { width: 100%; border-collapse: collapse; min-width: 560px; }
+.matrix th, .matrix td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
+.matrix thead th { background: var(--code-bg); }
+.matrix tbody tr:last-child td { border-bottom: 0; }
+.matrix td.dom a { font-family: var(--font-mono); font-weight: 500; color: var(--ink); text-decoration: none; }
+.matrix td.dom a:hover { color: var(--accent); text-decoration: underline; }
+
+/* Domain sheets */
+.domains { display: grid; gap: 24px; }
+article.domain { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; scroll-margin-top: 16px; }
+article.domain > header {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 16px 20px; border-bottom: 1px solid var(--rule);
+}
+article.domain h2 { font-family: var(--font-mono); font-weight: 500; font-size: var(--step-1); overflow-wrap: anywhere; }
+.checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.check { padding: 18px 20px; display: grid; gap: 10px; align-content: start; border-top: 1px solid var(--rule); }
+.check:nth-child(-n+2) { border-top: 0; }
+.check:nth-child(odd) { border-right: 1px solid var(--rule); }
+.check-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.check-head h3 { font-size: var(--step-1); letter-spacing: 0.02em; }
+.check-head h3 small { font: 400 var(--step--1) var(--font-body); color: var(--ink-soft); letter-spacing: 0; margin-left: 6px; }
+.summary { margin: 0; font-weight: 500; }
+.records { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.records li {
+  font: 400 0.8125rem/1.5 var(--font-mono); background: var(--code-bg); color: var(--ink);
+  padding: 7px 10px; border-radius: 3px; overflow-wrap: anywhere;
+}
+.records li .host { display: block; color: var(--ink-soft); font-size: 0.75rem; }
+.findings { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: var(--step--1); }
+.findings li { display: grid; grid-template-columns: 14px 1fr; gap: 8px; align-items: baseline; }
+.findings li::before { content: ""; width: 8px; height: 8px; border-radius: 2px; transform: translateY(-1px); }
+.findings li.pass::before { background: var(--pass); }
+.findings li.warn::before { background: var(--warn); }
+.findings li.fail::before { background: var(--fail); }
+.findings li.info::before { background: var(--info); }
+.empty { color: var(--ink-soft); font-style: italic; margin: 0; font-size: var(--step--1); }
+
+footer { font-size: var(--step--1); color: var(--ink-soft); border-top: 1px solid var(--rule); padding-top: 14px; display: grid; gap: 4px; }
+
+body.only-issues [data-overall="pass"] { display: none; }
+
+@media (max-width: 720px) {
+  .checks { grid-template-columns: 1fr; }
+  .check:nth-child(odd) { border-right: 0; }
+  .check:nth-child(2) { border-top: 1px solid var(--rule); }
+  header.top h1 { font-size: var(--step-2); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="label">SPF · DKIM · DMARC · Microsoft 365</div>
+    <h1>Mail DNS <span>Report</span></h1>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <div class="bar">
+    <div class="tally" id="tally"></div>
+    <div class="filter" role="group" aria-label="Filter domains">
+      <button type="button" id="f-all" aria-pressed="true">All domains</button>
+      <button type="button" id="f-issues" aria-pressed="false">Needs attention</button>
+    </div>
+  </div>
+
+  <section aria-labelledby="matrix-h">
+    <h2 id="matrix-h" class="label" style="margin-bottom:10px">Overview</h2>
+    <div class="matrix-scroll">
+      <table class="matrix">
+        <thead><tr>
+          <th class="label">Domain</th><th class="label">MX</th><th class="label">SPF</th>
+          <th class="label">DKIM</th><th class="label">DMARC</th><th class="label">Overall</th>
+        </tr></thead>
+        <tbody id="matrix-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="domains" id="domains" aria-label="Domain details"></section>
+
+  <footer>
+    <div>Overall status is the worst of SPF, DKIM and DMARC. MX is checked for Microsoft 365 routing but only fails the domain when no MX exists.</div>
+    <div>DKIM checks Microsoft 365 selectors <span class="mono">selector1</span> and <span class="mono">selector2</span>. Other providers use different selectors and will show as missing here.</div>
+  </footer>
+</div>
+
+<script id="report-data" type="application/json">__REPORT_DATA__</script>
+<script>
+(function () {
+  var data = JSON.parse(document.getElementById("report-data").textContent);
+  var CHECKS = [
+    { key: "mx", name: "MX", sub: "mail routing" },
+    { key: "spf", name: "SPF", sub: "sender policy" },
+    { key: "dkim", name: "DKIM", sub: "signing keys" },
+    { key: "dmarc", name: "DMARC", sub: "domain policy" }
+  ];
+  var LABEL = { pass: "Pass", warn: "Warning", fail: "Fail", info: "Info" };
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function pill(status) { return el("span", "pill " + status, LABEL[status] || status); }
+  function slug(d) { return "d-" + d.replace(/[^a-z0-9]+/gi, "-").toLowerCase(); }
+  function list(v) { return Array.isArray(v) ? v : (v == null ? [] : [v]); }
+
+  // Meta line
+  var meta = document.getElementById("meta");
+  var when = new Date(data.generated);
+  [["Generated", isNaN(when) ? data.generated : when.toLocaleString()],
+   ["Domains", String(list(data.domains).length)],
+   ["Source", data.source || "domains.txt"],
+   ["Resolver", data.resolver || "system"],
+   ["Tool", data.tool || ""]].forEach(function (p) {
+    var s = el("span", null, p[0] + " ");
+    s.appendChild(el("b", null, p[1]));
+    meta.appendChild(s);
+  });
+
+  var domains = list(data.domains);
+  var counts = { pass: 0, warn: 0, fail: 0 };
+  domains.forEach(function (d) { if (counts[d.overall] != null) counts[d.overall]++; });
+
+  var tally = document.getElementById("tally");
+  [["pass", "fully configured"], ["warn", "with warnings"], ["fail", "failing"]].forEach(function (t) {
+    var box = el("div", "t-" + t[0]);
+    box.appendChild(el("strong", null, String(counts[t[0]])));
+    box.appendChild(el("span", "label", t[1]));
+    tally.appendChild(box);
+  });
+
+  var tbody = document.getElementById("matrix-body");
+  var host = document.getElementById("domains");
+
+  domains.forEach(function (d) {
+    var tr = el("tr");
+    tr.dataset.overall = d.overall;
+    var td = el("td", "dom");
+    var a = el("a", null, d.domain);
+    a.href = "#" + slug(d.domain);
+    td.appendChild(a);
+    tr.appendChild(td);
+    CHECKS.forEach(function (c) {
+      var cell = el("td");
+      var chk = (d.checks || {})[c.key];
+      cell.appendChild(pill(chk ? chk.status : "info"));
+      tr.appendChild(cell);
+    });
+    var ov = el("td"); ov.appendChild(pill(d.overall)); tr.appendChild(ov);
+    tbody.appendChild(tr);
+
+    var art = el("article", "domain");
+    art.id = slug(d.domain);
+    art.dataset.overall = d.overall;
+    var hd = el("header");
+    hd.appendChild(el("h2", null, d.domain));
+    hd.appendChild(pill(d.overall));
+    art.appendChild(hd);
+
+    var grid = el("div", "checks");
+    CHECKS.forEach(function (c) {
+      var chk = (d.checks || {})[c.key] || { status: "info", summary: "Not checked" };
+      var box = el("section", "check");
+      var h = el("div", "check-head");
+      var h3 = el("h3", null, c.name);
+      h3.appendChild(el("small", null, c.sub));
+      h.appendChild(h3);
+      h.appendChild(pill(chk.status));
+      box.appendChild(h);
+      box.appendChild(el("p", "summary", chk.summary || ""));
+
+      var recs = list(chk.records);
+      if (recs.length) {
+        var ul = el("ul", "records");
+        recs.forEach(function (r) {
+          var li = el("li");
+          if (r && typeof r === "object") {
+            if (r.host) li.appendChild(el("span", "host", r.host));
+            li.appendChild(document.createTextNode(r.value || ""));
+          } else {
+            li.textContent = String(r);
+          }
+          ul.appendChild(li);
+        });
+        box.appendChild(ul);
+      } else {
+        box.appendChild(el("p", "empty", "No record found"));
+      }
+
+      var fnd = list(chk.findings);
+      if (fnd.length) {
+        var fl = el("ul", "findings");
+        fnd.forEach(function (f) { fl.appendChild(el("li", f.level || "info", f.text)); });
+        box.appendChild(fl);
+      }
+      grid.appendChild(box);
+    });
+    art.appendChild(grid);
+    host.appendChild(art);
+  });
+
+  var bAll = document.getElementById("f-all"), bIss = document.getElementById("f-issues");
+  function setFilter(issues) {
+    document.body.classList.toggle("only-issues", issues);
+    bAll.setAttribute("aria-pressed", String(!issues));
+    bIss.setAttribute("aria-pressed", String(issues));
+  }
+  bAll.addEventListener("click", function () { setFilter(false); });
+  bIss.addEventListener("click", function () { setFilter(true); });
+})();
+</script>
+</body>
+</html>

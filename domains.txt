@@ -1,0 +1,5 @@
+# One domain per line. Blank lines and lines starting with # are ignored.
+# Both python/ and powershell/ read this file by default.
+microsoft.com
+github.com
+example.com
