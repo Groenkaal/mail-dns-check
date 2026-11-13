@@ -266,10 +266,18 @@ body.only-issues [data-overall="pass"] { display: none; }
   </footer>
 </div>
 
-<script src="checks.js"></script>
+<!-- Bump ?v= whenever checks.js changes, so browsers never pair a new page with a cached old script. -->
+<script src="checks.js?v=3"></script>
 <script>
 (function () {
   "use strict";
+  if (!window.MailDnsChecks || !window.MailDnsChecks.parseSelectorList) {
+    var st = document.getElementById("status");
+    st.textContent = "The page loaded an outdated copy of its check script. Reload the page (Ctrl+F5) to fix this.";
+    st.className = "status error";
+    document.getElementById("run").disabled = true;
+    return;
+  }
   var TEMPLATE_URL = "https://raw.githubusercontent.com/Groenkaal/mail-dns-check/main/report-template.html";
   var CONCURRENCY = 3;
   var CHECKS = [
