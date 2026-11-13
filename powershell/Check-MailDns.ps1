@@ -1,8 +1,11 @@
 <#
 .SYNOPSIS
-    Check SPF, DKIM, DMARC (and MX) for a list of domains, tuned for Microsoft 365.
+    Check MX, SPF, DKIM and DMARC for a list of domains and write an HTML report.
 
 .DESCRIPTION
+    Works for any mail provider. Microsoft 365, Google Workspace and other known
+    providers get extra checks when the MX records point at them.
+
     Reads ..\domains.txt by default, asks where to write the HTML report, and fills
     ..\report-template.html with the results.
 
@@ -17,7 +20,7 @@
 .EXAMPLE
     .\Check-MailDns.ps1 -Domains list.txt -Output report.html -NameServer 1.1.1.1
 .EXAMPLE
-    .\Check-MailDns.ps1 -Domain contoso.com,fabrikam.com -Output report.html
+    .\Check-MailDns.ps1 -Domain contoso.com,fabrikam.com -Selector mycorp2024 -Output report.html
 .EXAMPLE
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Groenkaal/mail-dns-check/main/powershell/Check-MailDns.ps1))) -Domains list.txt -Output report.html
 #>
@@ -26,6 +29,8 @@ param(
     [Alias('Domains')]
     [string]$DomainsFile,
     [string[]]$Domain,
+    [Alias('Selectors')]
+    [string[]]$Selector,
     [Alias('Output')]
     [string]$OutputPath,
     [string]$NameServer,
@@ -34,16 +39,40 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-# Windows PowerShell 5.1 can default to TLS 1.0, which GitHub and Cloudflare refuse.
+# Windows PowerShell 5.1 can default to TLS 1.0, which GitHub and Google refuse.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 # $PSScriptRoot is empty when the script runs from memory (irm | scriptblock).
-$Root           = if ($PSScriptRoot) { Split-Path $PSScriptRoot -Parent } else { $null }
-$Template       = if ($Root) { Join-Path $Root 'report-template.html' } else { $null }
-$MsSpfInclude   = 'spf.protection.outlook.com'
-$MsMxSuffixes   = @('.mail.protection.outlook.com', '.mx.microsoft')
-$MsDkimSuffixes = @('.onmicrosoft.com', '.dkim.mail.microsoft')
-$DkimSelectors  = @('selector1', 'selector2')
+$Root     = if ($PSScriptRoot) { Split-Path $PSScriptRoot -Parent } else { $null }
+$Template = if ($Root) { Join-Path $Root 'report-template.html' } else { $null }
+
+# Keep these in step with python/check_mail_dns.py and docs/checks.js.
+# Providers are matched on MX host suffix. 'spf' lists includes that authorise the provider;
+# an empty list means the provider is a gateway or its include can't be predicted.
+$Providers = @(
+    @{ name = 'Microsoft 365';      gateway = $false; mx = @('.mail.protection.outlook.com', '.mx.microsoft'); spf = @('spf.protection.outlook.com'); dkim = @('selector1', 'selector2') }
+    @{ name = 'Google Workspace';   gateway = $false; mx = @('.google.com', '.googlemail.com'); spf = @('_spf.google.com'); dkim = @('google') }
+    @{ name = 'Zoho Mail';          gateway = $false; mx = @('.zoho.com', '.zoho.eu', '.zoho.in', '.zoho.com.au', '.zohomail.com')
+       spf = @('zoho.com', 'zoho.eu', 'zoho.in', 'zoho.com.au', 'zohomail.com', 'one.zoho.com', 'one.zoho.eu'); dkim = @('zoho', 'zmail') }
+    @{ name = 'Proton Mail';        gateway = $false; mx = @('.protonmail.ch'); spf = @('_spf.protonmail.ch'); dkim = @('protonmail', 'protonmail2', 'protonmail3') }
+    @{ name = 'Fastmail';           gateway = $false; mx = @('.messagingengine.com'); spf = @('spf.messagingengine.com'); dkim = @('fm1', 'fm2', 'fm3') }
+    @{ name = 'iCloud Mail';        gateway = $false; mx = @('.mail.icloud.com'); spf = @('icloud.com'); dkim = @('sig1') }
+    @{ name = 'Yandex Mail';        gateway = $false; mx = @('.yandex.net', '.yandex.ru'); spf = @('_spf.yandex.net'); dkim = @('mail') }
+    @{ name = 'Mimecast';           gateway = $true;  mx = @('.mimecast.com', '.mimecast.co.za'); spf = @(); dkim = @() }
+    @{ name = 'Proofpoint';         gateway = $true;  mx = @('.pphosted.com', '.ppe-hosted.com'); spf = @(); dkim = @() }
+    @{ name = 'Barracuda';          gateway = $true;  mx = @('.barracudanetworks.com'); spf = @(); dkim = @() }
+    @{ name = 'Cisco Secure Email'; gateway = $true;  mx = @('.iphmx.com'); spf = @(); dkim = @() }
+)
+$MsDkimSelectors = @('selector1', 'selector2')
+$MsDkimSuffixes  = @('.onmicrosoft.com', '.dkim.mail.microsoft')
+$CommonSelectors = @(
+    'selector1', 'selector2', 'google',
+    'default', 'dkim', 'mail', 'email', 'smtp', 'mx', 'key1', 'key2', 'dk',
+    'k1', 'k2', 'k3', 's1', 's2', 'zoho', 'zmail',
+    'protonmail', 'protonmail2', 'protonmail3', 'fm1', 'fm2', 'fm3', 'sig1',
+    'hs1', 'hs2', 'mandrill', 'mxvault', 'everlytickey1', 'everlytickey2',
+    'zendesk1', 'zendesk2', 'kl', 'kl2'
+)
 $SpfLookupLimit = 10
 $Severity       = @{ pass = 0; info = 0; warn = 1; fail = 2 }
 $UseNative      = [bool](Get-Command Resolve-DnsName -ErrorAction SilentlyContinue)
@@ -58,19 +87,30 @@ function Invoke-DohQuery([string]$Name, [string]$Type) {
     return @($resp.Answer | Where-Object { $_.type -eq $typeNum } | ForEach-Object { $_.data })
 }
 
+function Invoke-NativeQuery([string]$Name, [string]$Type, [string]$Server) {
+    # Returns @{ Missing = <name does not exist>; Records = <matching records> }.
+    $params = @{ Name = $Name; Type = $Type; DnsOnly = $true; ErrorAction = 'Stop' }
+    if ($Server) { $params.Server = $Server }
+    try { $answers = @(Resolve-DnsName @params) }
+    catch {
+        $msg = $_.Exception.Message
+        if ($msg -match 'timeout') { throw "DNS timeout looking up $Type $Name" }
+        return @{ Missing = ($msg -match 'does not exist'); Records = @() }
+    }
+    return @{ Missing = $false; Records = @($answers | Where-Object { [string]$_.Type -eq $Type }) }
+}
+
 function Get-Dns([string]$Name, [string]$Type) {
     # Returns record strings; empty when the name or type does not exist.
     $out = New-Object System.Collections.Generic.List[string]
     if ($UseNative) {
-        $params = @{ Name = $Name; Type = $Type; DnsOnly = $true; ErrorAction = 'Stop' }
-        if ($NameServer) { $params.Server = $NameServer }
-        try { $answers = @(Resolve-DnsName @params) }
-        catch {
-            if ($_.Exception.Message -match 'timeout') { throw "DNS timeout looking up $Type $Name" }
-            return @()
+        $res = Invoke-NativeQuery $Name $Type $NameServer
+        # Some local resolvers silently drop large TXT answers. Ask a public resolver before
+        # reporting a TXT record as missing (skipped when -NameServer is given).
+        if ($Type -eq 'TXT' -and -not $NameServer -and -not $res.Missing -and -not $res.Records.Count) {
+            try { $res = Invoke-NativeQuery $Name $Type '1.1.1.1' } catch { }
         }
-        foreach ($r in $answers) {
-            if ([string]$r.Type -ne $Type) { continue }
+        foreach ($r in $res.Records) {
             switch ($Type) {
                 'TXT'   { $out.Add(($r.Strings -join '')) }
                 'MX'    { $out.Add(('{0} {1}' -f $r.Preference, ([string]$r.NameExchange).TrimEnd('.'))) }
@@ -82,8 +122,11 @@ function Get-Dns([string]$Name, [string]$Type) {
         foreach ($d in (Invoke-DohQuery $Name $Type)) {
             switch ($Type) {
                 'TXT' {
-                    $parts = [regex]::Matches($d, '"((?:[^"\\]|\\.)*)"') | ForEach-Object { $_.Groups[1].Value -replace '\\(.)', '$1' }
-                    if ($parts) { $out.Add((@($parts) -join '')) } else { $out.Add($d) }
+                    if ($d.StartsWith('"')) {
+                        $parts = @([regex]::Matches($d, '"((?:[^"\\]|\\.)*)"') | ForEach-Object { $_.Groups[1].Value -replace '\\(.)', '$1' })
+                        $out.Add(($parts -join ''))
+                    }
+                    else { $out.Add($d) }
                 }
                 'MX' {
                     $p = $d -split '\s+', 2
@@ -119,27 +162,48 @@ function Test-EndsWithAny([string]$Value, [string[]]$Suffixes) {
     return $false
 }
 
+function Format-NameList([string[]]$Items, [int]$Limit = 6) {
+    if ($Items.Count -le $Limit) { return ($Items -join ', ') }
+    return (($Items[0..($Limit - 1)] -join ', ') + " and $($Items.Count - $Limit) more")
+}
+
+function Get-UniqueList([string[]]$Items) {
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($i in $Items) { if ($i -and -not $list.Contains($i)) { $list.Add($i) } }
+    return , $list.ToArray()
+}
+
 # ----------------------------------------------------------------------------- MX
 
-function Test-Mx([string]$Domain) {
-    $mx = @(Get-Dns $Domain 'MX' | Sort-Object { [int]($_ -split ' ')[0] })
-    $findings = @()
-    if (-not $mx.Count) {
-        return New-Check 'fail' 'No MX records. The domain cannot receive mail.' @() @()
+function Get-MxRecords([string]$Domain) {
+    @(Get-Dns $Domain 'MX' | Sort-Object { [int]($_ -split ' ')[0] }, { (($_ -split ' ', 2)[1]).ToLower() })
+}
+
+function Find-Provider([string[]]$Mx) {
+    foreach ($r in $Mx) {
+        $mxHost = (($r -split ' ', 2)[1]).ToLower()
+        foreach ($p in $Providers) { if (Test-EndsWithAny $mxHost $p.mx) { return $p } }
     }
-    $hosts = @($mx | ForEach-Object { (($_ -split ' ', 2)[1]).ToLower() })
+    return $null
+}
+
+function Test-Mx([string]$Domain, [string[]]$Mx, $Provider) {
+    $findings = @()
+    if (-not $Mx.Count) { return New-Check 'fail' 'No MX records. The domain cannot receive mail.' @() @() }
+    $hosts = @($Mx | ForEach-Object { (($_ -split ' ', 2)[1]).ToLower() })
     if ($hosts.Count -eq 1 -and $hosts[0] -eq '') {
         return New-Check 'info' 'Null MX (RFC 7505). The domain states it accepts no mail.' @('0 .') @()
     }
-    if (@($hosts | Where-Object { Test-EndsWithAny $_ $MsMxSuffixes }).Count) {
-        $status = 'pass'; $summary = 'Mail is routed to Exchange Online.'
-        if ($mx.Count -gt 1) { $findings += New-Finding 'info' "$($mx.Count) MX records. Microsoft 365 normally needs only one." }
+    if ($Provider -and $Provider.gateway) {
+        $summary = "Mail goes through $($Provider.name) (security gateway)."
+        $findings += New-Finding 'info' "The mailbox provider behind the gateway can't be seen from DNS."
     }
-    else {
-        $status = 'info'; $summary = 'Mail is not routed to Microsoft 365.'
-        $findings += New-Finding 'info' 'MX points elsewhere, e.g. a third-party gateway or another provider.'
-    }
-    return New-Check $status $summary $mx $findings
+    elseif ($Provider) { $summary = "Mail is handled by $($Provider.name)." }
+    else { $summary = "Mail is handled by $($hosts[0])." }
+    $mixed = $hosts -contains ''
+    if ($mixed) { $findings += New-Finding 'warn' 'A null MX (.) is mixed with real MX hosts. Remove one or the other.' }
+    $status = if ($mixed) { 'warn' } else { 'pass' }
+    return New-Check $status $summary $Mx $findings
 }
 
 # ----------------------------------------------------------------------------- SPF
@@ -180,11 +244,12 @@ function Measure-SpfLookups([string]$Domain, [hashtable]$Seen, [int]$Depth = 0) 
     return @{ Count = $count; Problems = $problems }
 }
 
-function Test-Spf([string]$Domain) {
+function Test-Spf([string]$Domain, $Provider) {
     $recs = @(Get-SpfRecords $Domain)
     if (-not $recs.Count) {
+        $example = if ($Provider -and $Provider.spf.Count) { "v=spf1 include:$($Provider.spf[0]) -all" } else { 'v=spf1 mx -all' }
         return New-Check 'fail' 'No SPF record. Receivers cannot verify who may send for this domain.' @() `
-            @(New-Finding 'fail' "Add TXT: v=spf1 include:$MsSpfInclude -all")
+            @(New-Finding 'fail' "Add a TXT record such as: $example")
     }
     if ($recs.Count -gt 1) {
         return New-Check 'fail' "$($recs.Count) SPF records. SPF fails when more than one exists." $recs `
@@ -195,26 +260,24 @@ function Test-Spf([string]$Domain) {
     $terms = @($rec -split '\s+' | Select-Object -Skip 1 | ForEach-Object { $_.ToLower() })
     $findings = @(); $statuses = @('pass')
 
-    if ($terms -contains "include:$MsSpfInclude") {
-        $findings += New-Finding 'pass' "Includes $MsSpfInclude (Microsoft 365)."
-    }
-    else {
-        $findings += New-Finding 'warn' "Does not include $MsSpfInclude. Microsoft 365 mail will fail SPF."
-        $statuses += 'warn'
+    if ($Provider -and $Provider.spf.Count) {
+        $hit = $Provider.spf | Where-Object { $terms -contains "include:$_" } | Select-Object -First 1
+        if ($hit) { $findings += New-Finding 'pass' "Includes $hit ($($Provider.name))." }
+        else {
+            $findings += New-Finding 'warn' ("MX points to $($Provider.name), but SPF does not include $($Provider.spf[0]). " +
+                "Mail sent from $($Provider.name) will fail SPF.")
+            $statuses += 'warn'
+        }
     }
 
     $allTerm  = $terms | Where-Object { $_.TrimStart('+', '-', '~', '?') -eq 'all' } | Select-Object -First 1
     $redirect = $terms | Where-Object { $_.StartsWith('redirect=') } | Select-Object -First 1
-    switch ($allTerm) {
-        '-all'  { $findings += New-Finding 'pass' 'Ends in -all (hard fail for unlisted senders).' }
-        '~all'  { $findings += New-Finding 'pass' 'Ends in ~all (soft fail). Fine with DMARC enforcement; -all is stricter.' }
-        '?all'  { $findings += New-Finding 'warn' 'Ends in ?all (neutral). Unlisted senders are not rejected.'; $statuses += 'warn' }
-        { $_ -in @('all', '+all') } { $findings += New-Finding 'fail' 'Ends in +all. Anyone may send as this domain.'; $statuses += 'fail' }
-        default {
-            if ($redirect) { $findings += New-Finding 'info' "Policy delegated with $redirect." }
-            elseif (-not $allTerm) { $findings += New-Finding 'warn' 'No all mechanism. Add -all or ~all at the end.'; $statuses += 'warn' }
-        }
-    }
+    if ($allTerm -eq '-all') { $findings += New-Finding 'pass' 'Ends in -all (hard fail for unlisted senders).' }
+    elseif ($allTerm -eq '~all') { $findings += New-Finding 'pass' 'Ends in ~all (soft fail). Fine with DMARC enforcement; -all is stricter.' }
+    elseif ($allTerm -eq '?all') { $findings += New-Finding 'warn' 'Ends in ?all (neutral). Unlisted senders are not rejected.'; $statuses += 'warn' }
+    elseif ($allTerm -in @('all', '+all')) { $findings += New-Finding 'fail' 'Ends in +all. Anyone may send as this domain.'; $statuses += 'fail' }
+    elseif ($redirect) { $findings += New-Finding 'info' "Policy delegated with $redirect." }
+    else { $findings += New-Finding 'warn' 'No all mechanism. Add -all or ~all at the end.'; $statuses += 'warn' }
 
     try { $m = Measure-SpfLookups $Domain @{} }
     catch { $m = @{ Count = -1; Problems = @("$_") } }
@@ -236,71 +299,85 @@ function Test-Spf([string]$Domain) {
 
 # ----------------------------------------------------------------------------- DKIM
 
-function Test-Dkim([string]$Domain) {
+function Get-DkimKey([string]$Domain, [string]$Sel) {
+    # The DKIM record at a selector (any record with a p= tag), or $null.
+    $txt = @(Get-Dns "$Sel._domainkey.$Domain" 'TXT' | Where-Object { ($_ -replace ' ', '') -match 'p=' })
+    if ($txt.Count) { return $txt[0] } else { return $null }
+}
+
+function Test-Dkim([string]$Domain, $Provider, [string[]]$Extra, [bool]$AcceptsMail = $true) {
+    $providerSelectors = if ($Provider) { $Provider.dkim } else { @() }
+    $selectors = Get-UniqueList (@($CommonSelectors) + @($providerSelectors) + @($Extra))
+    $msCnames = @{}
+    foreach ($s in $MsDkimSelectors) { $msCnames[$s] = Get-Cname "$s._domainkey.$Domain" }
+
+    $active = @(); $revoked = @()
+    foreach ($sel in $selectors) {
+        $key = Get-DkimKey $Domain $sel
+        if ($null -eq $key) { continue }
+        if (($key -replace ' ', '') -match '(?:^|;)p=([^;]*)' -and $Matches[1]) { $active += , @($sel, $key) }
+        else { $revoked += $sel }
+    }
+
     $findings = @(); $records = @()
-    $good = 0; $standby = @()
-    $expectedPrefix = $Domain.Replace('.', '-')
+    $activeNames = @($active | ForEach-Object { $_[0] })
+    $isMs = [bool]($Provider -and $Provider.name -eq 'Microsoft 365')
 
-    foreach ($sel in $DkimSelectors) {
-        $name   = "$sel._domainkey.$Domain"
-        $target = Get-Cname $name
-        $txt    = @(Get-Dns $name 'TXT' | Where-Object { ($_ -replace '\s', '') -match 'p=' })
+    foreach ($a in $active) {
+        $sel = $a[0]; $key = $a[1]; $target = $msCnames[$sel]
+        if ($target) { $records += [ordered]@{ host = "$sel._domainkey.$Domain CNAME"; value = $target } }
+        else {
+            $short = if ($key.Length -gt 120) { $key.Substring(0, 120) + [char]0x2026 } else { $key }
+            $records += [ordered]@{ host = "$sel._domainkey.$Domain TXT"; value = $short }
+        }
+        $findings += New-Finding 'pass' "${sel}: public key published."
+    }
 
-        if ($target) {
-            $records += [ordered]@{ host = "$name CNAME"; value = $target }
-            if (-not (Test-EndsWithAny $target $MsDkimSuffixes)) {
-                $findings += New-Finding 'warn' "$sel points outside Microsoft 365 ($target)."
-            }
-            elseif (-not $target.ToLower().StartsWith("$sel-$expectedPrefix".ToLower())) {
-                $findings += New-Finding 'info' "$sel target name does not match $sel-$expectedPrefix."
-            }
+    # Microsoft 365 publishes DKIM as CNAMEs at selector1/selector2. One can sit without a key between rotations.
+    $standby  = @($MsDkimSelectors | Where-Object { $msCnames[$_] -and $activeNames -notcontains $_ })
+    $msActive = @($MsDkimSelectors | Where-Object { $activeNames -contains $_ })
+    $expected = $Domain.Replace('.', '-')
+    foreach ($sel in $MsDkimSelectors) {
+        $target = $msCnames[$sel]
+        if (-not $target) { continue }
+        $isMsTarget = Test-EndsWithAny $target $MsDkimSuffixes
+        if (-not ($isMs -or $isMsTarget)) { continue }
+        if ($standby -contains $sel) { $records += [ordered]@{ host = "$sel._domainkey.$Domain CNAME"; value = $target } }
+        if ($isMs -and -not $isMsTarget) { $findings += New-Finding 'warn' "$sel points outside Microsoft 365 ($target)." }
+        elseif ($isMsTarget -and -not $target.ToLower().StartsWith("$sel-$expected")) {
+            $findings += New-Finding 'info' "$sel target name does not match $sel-$expected."
         }
-        if ($txt.Count) {
-            $key = $txt[0]
-            if (($key -replace '\s', '') -match '(?:^|;)p=([^;]+)') {
-                $good++
-                if (-not $target) {
-                    $short = if ($key.Length -gt 120) { $key.Substring(0, 120) + [char]0x2026 } else { $key }
-                    $records += [ordered]@{ host = "$name TXT"; value = $short }
-                }
-                $findings += New-Finding 'pass' "${sel}: public key published."
-            }
-            else {
-                $findings += New-Finding 'fail' "${sel}: key is empty (p=), so the key is revoked."
-            }
-        }
-        elseif ($target) {
-            $standby += $sel
+    }
+    foreach ($sel in $standby) {
+        if ($msActive.Count) { $findings += New-Finding 'info' "${sel}: standby selector, no key yet. Normal between rotations." }
+        else {
             $findings += New-Finding 'warn' ("${sel}: CNAME exists but the target has no key. " +
                 'Enable DKIM signing for this domain in the Microsoft Defender portal.')
         }
-        else {
-            $findings += New-Finding 'fail' "${sel}: no record at $name."
-        }
     }
+    if ($isMs -and -not $msActive.Count -and -not $standby.Count) {
+        $findings += New-Finding 'warn' ('Microsoft 365 DKIM is not set up (no selector1/selector2). Microsoft 365 then ' +
+            'signs with your onmicrosoft.com domain, which does not align for DMARC.')
+    }
+    if ($Provider -and $Provider.name -eq 'Google Workspace' -and $activeNames -notcontains 'google') {
+        $findings += New-Finding 'info' "Google Workspace's default selector (google) has no key. A custom selector may be in use."
+    }
+    if ($revoked.Count) { $findings += New-Finding 'info' "Empty (revoked) key at: $(Format-NameList $revoked)." }
 
-    if ($good -eq $DkimSelectors.Count) {
-        $status = 'pass'; $summary = 'Both Microsoft 365 DKIM selectors are published.'
+    if ($active.Count) {
+        $status = 'pass'
+        $plural = if ($active.Count -gt 1) { 's' } else { '' }
+        $summary = "DKIM key found at $($active.Count) selector${plural}: $(Format-NameList $activeNames)."
+        if (@($findings | Where-Object { $_.level -in @('warn', 'fail') }).Count) { $status = 'warn' }
     }
-    elseif ($good -and $standby.Count) {
-        $status = 'pass'; $summary = 'DKIM signing is active. The other selector is on standby for key rotation.'
-        foreach ($f in $findings) {
-            if ($f.text.EndsWith('Microsoft Defender portal.')) {
-                $f.level = 'info'
-                $f.text = ($f.text -split ':', 2)[0] + ': standby selector, no key yet. Normal between rotations.'
-            }
-        }
-    }
-    elseif ($good) {
-        $status = 'warn'; $summary = 'Only one DKIM selector is published. Key rotation will break signing.'
-    }
-    elseif ($standby.Count) {
-        $status = 'warn'; $summary = 'DKIM CNAMEs exist but no key is published. Signing is not enabled yet.'
-    }
+    elseif ($standby.Count) { $status = 'warn'; $summary = 'DKIM CNAMEs exist but no key is published. Signing is not enabled yet.' }
+    elseif ($revoked.Count -and -not $AcceptsMail) { $status = 'info'; $summary = 'Only empty (revoked) keys found. Typical for a domain that sends no mail.' }
+    elseif ($revoked.Count) { $status = 'warn'; $summary = 'Only empty (revoked) keys found. Active keys may be under a selector not checked here.' }
     else {
-        $status = 'fail'; $summary = 'No Microsoft 365 DKIM key found.'
+        $status = 'warn'
+        $summary = "No DKIM key found on the $($selectors.Count) common selectors checked."
+        $findings += New-Finding 'warn' 'DKIM may still be set up under a custom selector. Add it to the selector list to check it.'
     }
-    if ($status -eq 'pass' -and @($findings | Where-Object { $_.level -in @('warn', 'fail') }).Count) { $status = 'warn' }
     return New-Check $status $summary $records $findings
 }
 
@@ -363,10 +440,7 @@ function Test-Dmarc([string]$Domain) {
 
 # ----------------------------------------------------------------------------- Run
 
-function Invoke-Safe([scriptblock]$Check, [string]$Domain) {
-    try { & $Check $Domain }
-    catch { New-Check 'fail' 'Lookup error.' @() @(New-Finding 'fail' "$_") }
-}
+function New-ErrorCheck($Err) { New-Check 'fail' 'Lookup error.' @() @(New-Finding 'fail' "$Err") }
 
 function Get-Tenant([string]$Domain) {
     # Microsoft Entra tenant behind the domain, from the public OpenID configuration.
@@ -385,19 +459,31 @@ function Get-Tenant([string]$Domain) {
     return [ordered]@{ found = $false }
 }
 
-function Test-Domain([string]$Domain) {
-    $checks = [ordered]@{
-        mx    = Invoke-Safe ${function:Test-Mx}    $Domain
-        spf   = Invoke-Safe ${function:Test-Spf}   $Domain
-        dkim  = Invoke-Safe ${function:Test-Dkim}  $Domain
-        dmarc = Invoke-Safe ${function:Test-Dmarc} $Domain
+function Test-Domain([string]$Domain, [string[]]$ExtraSelectors) {
+    $provider = $null; $mx = @()
+    try {
+        $mx = @(Get-MxRecords $Domain)
+        $provider = Find-Provider $mx
+        $mxCheck = Test-Mx $Domain $mx $provider
     }
+    catch { $mxCheck = New-ErrorCheck $_ }
+    $checks = [ordered]@{ mx = $mxCheck }
+    try { $checks.spf = Test-Spf $Domain $provider } catch { $checks.spf = New-ErrorCheck $_ }
+    $acceptsMail = [bool](@($mx | Where-Object { ($_ -split ' ', 2)[1] }).Count)
+    try { $checks.dkim = Test-Dkim $Domain $provider $ExtraSelectors $acceptsMail } catch { $checks.dkim = New-ErrorCheck $_ }
+    try { $checks.dmarc = Test-Dmarc $Domain } catch { $checks.dmarc = New-ErrorCheck $_ }
+
     $mxPart = if ($checks.mx.status -eq 'fail') { 'fail' } else { 'pass' }
     $overall = Get-Worst @($checks.spf.status, $checks.dkim.status, $checks.dmarc.status, $mxPart)
-    $result = [ordered]@{ domain = $Domain; overall = $overall; checks = $checks }
+    $providerName = if ($provider) { $provider.name } else { $null }
+    $result = [ordered]@{ domain = $Domain; overall = $overall; provider = $providerName; checks = $checks }
     $tenant = Get-Tenant $Domain
     if ($tenant) { $result.tenant = $tenant }
     return $result
+}
+
+function Split-ArgList([string[]]$Values) {
+    Get-UniqueList @($Values | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLower().TrimEnd('.') })
 }
 
 # Domains: -Domain wins, then -Domains <file>, then domains.txt in the repo root.
@@ -418,6 +504,7 @@ $domains = @($lines |
     ForEach-Object { ($_ -split '#', 2)[0].Trim().ToLower().TrimEnd('.') } |
     Where-Object { $_ } | Select-Object -Unique)
 if (-not $domains.Count) { throw "No domains found in $source" }
+$extraSelectors = if ($Selector) { @(Split-ArgList $Selector) } else { @() }
 
 # Template: local copy when the repo is on disk, otherwise download it.
 if ($Template -and (Test-Path -LiteralPath $Template)) {
@@ -444,7 +531,7 @@ if ($outDir -and -not (Test-Path $outDir)) { New-Item -ItemType Directory -Path 
 $results = @()
 foreach ($d in $domains) {
     Write-Host "Checking $d ... " -NoNewline
-    $r = Test-Domain $d
+    $r = Test-Domain $d $extraSelectors
     $color = @{ pass = 'Green'; warn = 'Yellow'; fail = 'Red' }[$r.overall]
     Write-Host $r.overall.ToUpper() -ForegroundColor $color
     $results += $r

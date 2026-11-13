@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Check SPF, DKIM, DMARC (and MX) for a list of domains, tuned for Microsoft 365.
+"""Check MX, SPF, DKIM and DMARC for a list of domains and write an HTML report.
+
+Works for any mail provider. Microsoft 365, Google Workspace and other known
+providers get extra checks when the MX records point at them.
 
 Reads ../domains.txt by default, asks where to write the HTML report,
 and fills ../report-template.html with the results.
@@ -9,6 +12,7 @@ Usage:
     python check_mail_dns.py -o report.html  # no prompt
     python check_mail_dns.py --domains list.txt --output report.html -n 1.1.1.1
     python check_mail_dns.py --domain contoso.com fabrikam.com -o report.html
+    python check_mail_dns.py --selector mycorp2024 s2025 -o report.html
 """
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,17 +36,49 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DOMAINS = ROOT / "domains.txt"
 TEMPLATE = ROOT / "report-template.html"
 
-MS_SPF_INCLUDE = "spf.protection.outlook.com"
-MS_MX_SUFFIXES = (".mail.protection.outlook.com", ".mx.microsoft")
+# Keep PROVIDERS and COMMON_SELECTORS in step with docs/checks.js and powershell/Check-MailDns.ps1.
+# Providers are matched on MX host suffix. "spf" lists includes that authorise the provider;
+# an empty tuple means the provider is a gateway or its include can't be predicted.
+PROVIDERS = [
+    {"name": "Microsoft 365", "mx": (".mail.protection.outlook.com", ".mx.microsoft"),
+     "spf": ("spf.protection.outlook.com",), "dkim": ("selector1", "selector2")},
+    {"name": "Google Workspace", "mx": (".google.com", ".googlemail.com"),
+     "spf": ("_spf.google.com",), "dkim": ("google",)},
+    {"name": "Zoho Mail", "mx": (".zoho.com", ".zoho.eu", ".zoho.in", ".zoho.com.au", ".zohomail.com"),
+     "spf": ("zoho.com", "zoho.eu", "zoho.in", "zoho.com.au", "zohomail.com", "one.zoho.com", "one.zoho.eu"), "dkim": ("zoho", "zmail")},
+    {"name": "Proton Mail", "mx": (".protonmail.ch",), "spf": ("_spf.protonmail.ch",),
+     "dkim": ("protonmail", "protonmail2", "protonmail3")},
+    {"name": "Fastmail", "mx": (".messagingengine.com",), "spf": ("spf.messagingengine.com",), "dkim": ("fm1", "fm2", "fm3")},
+    {"name": "iCloud Mail", "mx": (".mail.icloud.com",), "spf": ("icloud.com",), "dkim": ("sig1",)},
+    {"name": "Yandex Mail", "mx": (".yandex.net", ".yandex.ru"), "spf": ("_spf.yandex.net",), "dkim": ("mail",)},
+    {"name": "Mimecast", "mx": (".mimecast.com", ".mimecast.co.za"), "spf": (), "dkim": (), "gateway": True},
+    {"name": "Proofpoint", "mx": (".pphosted.com", ".ppe-hosted.com"), "spf": (), "dkim": (), "gateway": True},
+    {"name": "Barracuda", "mx": (".barracudanetworks.com",), "spf": (), "dkim": (), "gateway": True},
+    {"name": "Cisco Secure Email", "mx": (".iphmx.com",), "spf": (), "dkim": (), "gateway": True},
+]
+MS_DKIM_SELECTORS = ("selector1", "selector2")
 MS_DKIM_SUFFIXES = (".onmicrosoft.com", ".dkim.mail.microsoft")
-DKIM_SELECTORS = ("selector1", "selector2")
+COMMON_SELECTORS = (
+    "selector1", "selector2",                        # Microsoft 365
+    "google",                                        # Google Workspace
+    "default", "dkim", "mail", "email", "smtp", "mx", "key1", "key2", "dk",
+    "k1", "k2", "k3",                                # Mailchimp, Mailgun
+    "s1", "s2",                                      # SendGrid
+    "zoho", "zmail",                                 # Zoho
+    "protonmail", "protonmail2", "protonmail3",      # Proton
+    "fm1", "fm2", "fm3",                             # Fastmail
+    "sig1",                                          # iCloud
+    "hs1", "hs2",                                    # HubSpot
+    "mandrill", "mxvault", "everlytickey1", "everlytickey2",
+    "zendesk1", "zendesk2", "kl", "kl2",             # Zendesk, Klaviyo
+)
 SPF_LOOKUP_LIMIT = 10
 SEVERITY = {"pass": 0, "info": 0, "warn": 1, "fail": 2}
 
 resolver = dns.resolver.Resolver()
 resolver.lifetime = 6.0
 # Some local resolvers (home routers, systemd-resolved) silently drop large TXT
-# answers. When the system resolver returns no TXT, ask a public one to be sure.
+# answers. When the system resolver returns an empty TXT answer, ask a public one.
 public_resolver = dns.resolver.Resolver(configure=False)
 public_resolver.nameservers = ["1.1.1.1", "8.8.8.8"]
 public_resolver.lifetime = 6.0
@@ -53,11 +90,14 @@ use_public_fallback = True
 def query(name: str, rtype: str) -> list[str]:
     """Return record strings, [] when the name or type does not exist."""
     answer = None
-    for r in ([resolver, public_resolver] if rtype == "TXT" and use_public_fallback else [resolver]):
+    resolvers = [resolver, public_resolver] if rtype == "TXT" and use_public_fallback else [resolver]
+    for r in resolvers:
         try:
             answer = r.resolve(name, rtype)
             break
-        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.NoNameservers):
+        except dns.resolver.NXDOMAIN:
+            return []
+        except (dns.resolver.NoAnswer, dns.resolver.NoNameservers):
             continue
         except dns.exception.Timeout:
             if r is resolver:
@@ -92,10 +132,28 @@ def finding(level: str, text: str) -> dict:
     return {"level": level, "text": text}
 
 
+def name_list(items: list[str], limit: int = 6) -> str:
+    if len(items) <= limit:
+        return ", ".join(items)
+    return ", ".join(items[:limit]) + f" and {len(items) - limit} more"
+
+
 # --------------------------------------------------------------------------- MX
 
-def check_mx(domain: str) -> dict:
-    mx = sorted(query(domain, "MX"), key=lambda r: int(r.split()[0]))
+def mx_records(domain: str) -> list[str]:
+    return sorted(query(domain, "MX"), key=lambda r: (int(r.split()[0]), r.split(" ", 1)[1].lower()))
+
+
+def detect_provider(mx: list[str]) -> dict | None:
+    for r in mx:
+        host = r.split(" ", 1)[1].lower() if " " in r else ""
+        for p in PROVIDERS:
+            if host.endswith(p["mx"]):
+                return p
+    return None
+
+
+def check_mx(domain: str, mx: list[str], provider: dict | None) -> dict:
     findings = []
     if not mx:
         return {"status": "fail", "summary": "No MX records. The domain cannot receive mail.",
@@ -104,14 +162,16 @@ def check_mx(domain: str) -> dict:
     if hosts == [""]:
         return {"status": "info", "summary": "Null MX (RFC 7505). The domain states it accepts no mail.",
                 "records": ["0 ."], "findings": findings}
-    if any(h.endswith(MS_MX_SUFFIXES) for h in hosts):
-        status, summary = "pass", "Mail is routed to Exchange Online."
-        if len(mx) > 1:
-            findings.append(finding("info", f"{len(mx)} MX records. Microsoft 365 normally needs only one."))
+    if provider and provider.get("gateway"):
+        summary = f"Mail goes through {provider['name']} (security gateway)."
+        findings.append(finding("info", "The mailbox provider behind the gateway can't be seen from DNS."))
+    elif provider:
+        summary = f"Mail is handled by {provider['name']}."
     else:
-        status, summary = "info", "Mail is not routed to Microsoft 365."
-        findings.append(finding("info", "MX points elsewhere, e.g. a third-party gateway or another provider."))
-    return {"status": status, "summary": summary, "records": mx, "findings": findings}
+        summary = f"Mail is handled by {hosts[0]}."
+    if "" in hosts:
+        findings.append(finding("warn", "A null MX (.) is mixed with real MX hosts. Remove one or the other."))
+    return {"status": "warn" if "" in hosts else "pass", "summary": summary, "records": mx, "findings": findings}
 
 
 # --------------------------------------------------------------------------- SPF
@@ -147,12 +207,13 @@ def count_spf_lookups(domain: str, seen: set[str] | None = None, depth: int = 0)
     return count, problems
 
 
-def check_spf(domain: str) -> dict:
+def check_spf(domain: str, provider: dict | None) -> dict:
     recs = spf_records(domain)
     findings = []
     if not recs:
+        example = f"v=spf1 include:{provider['spf'][0]} -all" if provider and provider["spf"] else "v=spf1 mx -all"
         return {"status": "fail", "summary": "No SPF record. Receivers cannot verify who may send for this domain.",
-                "records": [], "findings": [finding("fail", f"Add TXT: v=spf1 include:{MS_SPF_INCLUDE} -all")]}
+                "records": [], "findings": [finding("fail", f"Add a TXT record such as: {example}")]}
     if len(recs) > 1:
         return {"status": "fail", "summary": f"{len(recs)} SPF records. SPF fails when more than one exists.",
                 "records": recs, "findings": [finding("fail", "Merge them into a single v=spf1 record.")]}
@@ -161,19 +222,22 @@ def check_spf(domain: str) -> dict:
     terms = [t.lower() for t in rec.split()[1:]]
     statuses = []
 
-    if f"include:{MS_SPF_INCLUDE}" in terms:
-        findings.append(finding("pass", f"Includes {MS_SPF_INCLUDE} (Microsoft 365)."))
-    else:
-        findings.append(finding("warn", f"Does not include {MS_SPF_INCLUDE}. Microsoft 365 mail will fail SPF."))
-        statuses.append("warn")
+    if provider and provider["spf"]:
+        hit = next((inc for inc in provider["spf"] if f"include:{inc}" in terms), None)
+        if hit:
+            findings.append(finding("pass", f"Includes {hit} ({provider['name']})."))
+        else:
+            findings.append(finding("warn", f"MX points to {provider['name']}, but SPF does not include "
+                                    f"{provider['spf'][0]}. Mail sent from {provider['name']} will fail SPF."))
+            statuses.append("warn")
 
     all_term = next((t for t in terms if t.lstrip("+-~?") == "all"), None)
     redirect = next((t for t in terms if t.startswith("redirect=")), None)
-    if all_term in ("-all",):
+    if all_term == "-all":
         findings.append(finding("pass", "Ends in -all (hard fail for unlisted senders)."))
     elif all_term == "~all":
         findings.append(finding("pass", "Ends in ~all (soft fail). Fine with DMARC enforcement; -all is stricter."))
-    elif all_term in ("?all",):
+    elif all_term == "?all":
         findings.append(finding("warn", "Ends in ?all (neutral). Unlisted senders are not rejected."))
         statuses.append("warn")
     elif all_term in ("all", "+all"):
@@ -209,52 +273,84 @@ def check_spf(domain: str) -> dict:
 
 # --------------------------------------------------------------------------- DKIM
 
-def check_dkim(domain: str) -> dict:
+def dkim_key(domain: str, sel: str) -> str | None:
+    """The DKIM record at a selector (any record with a p= tag), or None."""
+    txt = [t for t in query(f"{sel}._domainkey.{domain}", "TXT") if "p=" in t.replace(" ", "")]
+    return txt[0] if txt else None
+
+
+def check_dkim(domain: str, provider: dict | None, extra: tuple[str, ...] = (), accepts_mail: bool = True) -> dict:
+    selectors = list(dict.fromkeys([*COMMON_SELECTORS, *(provider["dkim"] if provider else ()), *extra]))
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        keys = list(pool.map(lambda s: dkim_key(domain, s), selectors))
+        ms_targets = list(pool.map(lambda s: cname(f"{s}._domainkey.{domain}"), MS_DKIM_SELECTORS))
+
+    active, revoked = [], []
+    for sel, key in zip(selectors, keys):
+        if key is None:
+            continue
+        m = re.search(r"(?:^|;)p=([^;]*)", key.replace(" ", ""))
+        (active if m and m.group(1) else revoked).append((sel, key))
+
     findings, records = [], []
-    good = 0
-    expected_prefix = domain.replace(".", "-")
-    for sel in DKIM_SELECTORS:
-        name = f"{sel}._domainkey.{domain}"
-        target = cname(name)
-        txt = [t for t in query(name, "TXT") if "p=" in t.replace(" ", "")]
+    ms_cnames = dict(zip(MS_DKIM_SELECTORS, ms_targets))
+    active_names = [s for s, _ in active]
+    is_ms = bool(provider and provider["name"] == "Microsoft 365")
+
+    for sel, key in active:
+        target = ms_cnames.get(sel)
         if target:
-            records.append({"host": f"{name} CNAME", "value": target})
-            if not target.lower().endswith(MS_DKIM_SUFFIXES):
-                findings.append(finding("warn", f"{sel} points outside Microsoft 365 ({target})."))
-            elif not target.lower().startswith(f"{sel}-{expected_prefix}".lower()):
-                findings.append(finding("info", f"{sel} target name does not match {sel}-{expected_prefix}."))
-        if txt:
-            key = txt[0]
-            m = re.search(r"\bp=([^;\s]*)", key.replace(" ", ""))
-            if m and m.group(1):
-                good += 1
-                if not target:
-                    records.append({"host": f"{name} TXT", "value": key[:120] + ("…" if len(key) > 120 else "")})
-                findings.append(finding("pass", f"{sel}: public key published."))
-            else:
-                findings.append(finding("fail", f"{sel}: key is empty (p=), so the key is revoked."))
-        elif target:
+            records.append({"host": f"{sel}._domainkey.{domain} CNAME", "value": target})
+        else:
+            records.append({"host": f"{sel}._domainkey.{domain} TXT",
+                            "value": key[:120] + ("…" if len(key) > 120 else "")})
+        findings.append(finding("pass", f"{sel}: public key published."))
+
+    # Microsoft 365 publishes DKIM as CNAMEs at selector1/selector2. One can sit without a key between rotations.
+    standby = [s for s in MS_DKIM_SELECTORS if ms_cnames[s] and s not in active_names]
+    ms_active = [s for s in MS_DKIM_SELECTORS if s in active_names]
+    expected = domain.replace(".", "-")
+    for sel in MS_DKIM_SELECTORS:
+        target = ms_cnames[sel]
+        if not target or not (is_ms or target.lower().endswith(MS_DKIM_SUFFIXES)):
+            continue
+        if sel in standby:
+            records.append({"host": f"{sel}._domainkey.{domain} CNAME", "value": target})
+        if is_ms and not target.lower().endswith(MS_DKIM_SUFFIXES):
+            findings.append(finding("warn", f"{sel} points outside Microsoft 365 ({target})."))
+        elif target.lower().endswith(MS_DKIM_SUFFIXES) and not target.lower().startswith(f"{sel}-{expected}"):
+            findings.append(finding("info", f"{sel} target name does not match {sel}-{expected}."))
+    for sel in standby:
+        if ms_active:
+            findings.append(finding("info", f"{sel}: standby selector, no key yet. Normal between rotations."))
+        else:
             findings.append(finding("warn", f"{sel}: CNAME exists but the target has no key. "
                                     "Enable DKIM signing for this domain in the Microsoft Defender portal."))
-        else:
-            findings.append(finding("fail", f"{sel}: no record at {name}."))
+    if is_ms and not ms_active and not standby:
+        findings.append(finding("warn", "Microsoft 365 DKIM is not set up (no selector1/selector2). Microsoft 365 then "
+                                "signs with your onmicrosoft.com domain, which does not align for DMARC."))
+    if provider and provider["name"] == "Google Workspace" and "google" not in active_names:
+        findings.append(finding("info", "Google Workspace's default selector (google) has no key. "
+                                "A custom selector may be in use."))
+    if revoked:
+        findings.append(finding("info", f"Empty (revoked) key at: {name_list([s for s, _ in revoked])}."))
 
-    standby = sum(1 for f in findings if f["text"].endswith("Microsoft Defender portal."))
-    if good == len(DKIM_SELECTORS):
-        status, summary = "pass", "Both Microsoft 365 DKIM selectors are published."
-    elif good and standby:
-        status, summary = "pass", "DKIM signing is active. The other selector is on standby for key rotation."
-        for f in findings:
-            if f["text"].endswith("Microsoft Defender portal."):
-                f["level"], f["text"] = "info", f["text"].split(":", 1)[0] + ": standby selector, no key yet. Normal between rotations."
-    elif good:
-        status, summary = "warn", "Only one DKIM selector is published. Key rotation will break signing."
+    if active:
+        status = "pass"
+        summary = f"DKIM key found at {len(active)} selector{'s' if len(active) > 1 else ''}: {name_list(active_names)}."
+        if any(f["level"] in ("warn", "fail") for f in findings):
+            status = "warn"
     elif standby:
         status, summary = "warn", "DKIM CNAMEs exist but no key is published. Signing is not enabled yet."
+    elif revoked and not accepts_mail:
+        status, summary = "info", "Only empty (revoked) keys found. Typical for a domain that sends no mail."
+    elif revoked:
+        status, summary = "warn", "Only empty (revoked) keys found. Active keys may be under a selector not checked here."
     else:
-        status, summary = "fail", "No Microsoft 365 DKIM key found."
-    if status == "pass" and any(f["level"] in ("warn", "fail") for f in findings):
         status = "warn"
+        summary = f"No DKIM key found on the {len(selectors)} common selectors checked."
+        findings.append(finding("warn", "DKIM may still be set up under a custom selector. "
+                                "Add it to the selector list to check it."))
     return {"status": status, "summary": summary, "records": records, "findings": findings}
 
 
@@ -319,9 +415,9 @@ def check_dmarc(domain: str) -> dict:
 
 # --------------------------------------------------------------------------- Run
 
-def safe(fn, domain: str) -> dict:
+def safe(fn, *args) -> dict:
     try:
-        return fn(domain)
+        return fn(*args)
     except Exception as e:  # keep going for the other domains
         return {"status": "fail", "summary": "Lookup error.", "records": [], "findings": [finding("fail", str(e))]}
 
@@ -340,12 +436,20 @@ def lookup_tenant(domain: str) -> dict | None:
     return {"found": True, "id": m.group(0), "region": data.get("tenant_region_scope", "")} if m else {"found": False}
 
 
-def check_domain(domain: str) -> dict:
-    checks = {"mx": safe(check_mx, domain), "spf": safe(check_spf, domain),
-              "dkim": safe(check_dkim, domain), "dmarc": safe(check_dmarc, domain)}
+def check_domain(domain: str, extra_selectors: tuple[str, ...] = ()) -> dict:
+    mx: list[str] = []
+    try:
+        mx = mx_records(domain)
+        provider = detect_provider(mx)
+        mx_check = check_mx(domain, mx, provider)
+    except Exception as e:
+        provider = None
+        mx_check = {"status": "fail", "summary": "Lookup error.", "records": [], "findings": [finding("fail", str(e))]}
+    checks = {"mx": mx_check, "spf": safe(check_spf, domain, provider),
+              "dkim": safe(check_dkim, domain, provider, extra_selectors, any(r.split(" ", 1)[1] for r in mx)), "dmarc": safe(check_dmarc, domain)}
     overall = worst(checks["spf"]["status"], checks["dkim"]["status"], checks["dmarc"]["status"],
                     "fail" if checks["mx"]["status"] == "fail" else "pass")
-    result = {"domain": domain, "overall": overall, "checks": checks}
+    result = {"domain": domain, "overall": overall, "provider": provider["name"] if provider else None, "checks": checks}
     tenant = lookup_tenant(domain)
     if tenant:
         result["tenant"] = tenant
@@ -371,10 +475,15 @@ def ask_output_path() -> Path:
     return path
 
 
+def split_args(values: list[str] | None) -> list[str]:
+    return list(dict.fromkeys(v.strip().lower().rstrip(".") for arg in values or [] for v in arg.split(",") if v.strip()))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-d", "--domains", type=Path, default=DEFAULT_DOMAINS, help="domain list (default: ../domains.txt)")
     ap.add_argument("-D", "--domain", nargs="+", metavar="DOMAIN", help="check these domains instead of a file")
+    ap.add_argument("-s", "--selector", nargs="+", metavar="SELECTOR", help="extra DKIM selectors to check")
     ap.add_argument("-o", "--output", type=Path, help="HTML report path (prompted if omitted)")
     ap.add_argument("-n", "--nameserver", help="DNS server to query instead of the system resolver")
     args = ap.parse_args()
@@ -384,7 +493,7 @@ def main() -> int:
         resolver.nameservers = [args.nameserver]
         use_public_fallback = False
     if args.domain:
-        domains = list(dict.fromkeys(d.strip().lower().rstrip(".") for arg in args.domain for d in arg.split(",") if d.strip()))
+        domains = split_args(args.domain)
         source = "command line"
     else:
         if not args.domains.exists():
@@ -393,6 +502,7 @@ def main() -> int:
         source = args.domains.name
     if not domains:
         sys.exit(f"No domains found in {source}")
+    selectors = tuple(split_args(args.selector))
 
     out = args.output.expanduser() if args.output else ask_output_path()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -400,7 +510,7 @@ def main() -> int:
     results = []
     for d in domains:
         print(f"Checking {d} ...", end=" ", flush=True)
-        r = check_domain(d)
+        r = check_domain(d, selectors)
         print(r["overall"].upper())
         results.append(r)
 

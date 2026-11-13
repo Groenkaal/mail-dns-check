@@ -181,7 +181,7 @@ body.only-issues [data-overall="pass"] { display: none; }
 <body>
 <div class="wrap">
   <header class="top">
-    <div class="label">SPF · DKIM · DMARC · Microsoft 365</div>
+    <div class="label">MX · SPF · DKIM · DMARC</div>
     <h1>Mail DNS <span>Report</span></h1>
     <div class="meta" id="meta"></div>
   </header>
@@ -210,8 +210,8 @@ body.only-issues [data-overall="pass"] { display: none; }
   <section class="domains" id="domains" aria-label="Domain details"></section>
 
   <footer>
-    <div>Overall status is the worst of SPF, DKIM and DMARC. MX is checked for Microsoft 365 routing but only fails the domain when no MX exists.</div>
-    <div>DKIM checks Microsoft 365 selectors <span class="mono">selector1</span> and <span class="mono">selector2</span>. Other providers use different selectors and will show as missing here.</div>
+    <div>Overall status is the worst of SPF, DKIM and DMARC. MX only fails the domain when no MX exists.</div>
+    <div>DNS can't list DKIM selectors, so DKIM is checked on common selectors (Microsoft 365, Google, SendGrid, Mailchimp and more) plus any you add. A key under a custom selector only shows up if you add that selector.</div>
   </footer>
 </div>
 
@@ -288,11 +288,10 @@ body.only-issues [data-overall="pass"] { display: none; }
     var hd = el("header");
     var title = el("div", "dom-title");
     title.appendChild(el("h2", null, d.domain));
-    if (d.tenant) {
-      title.appendChild(el("div", "tenant", d.tenant.found
-        ? "Microsoft 365 tenant " + d.tenant.id + (d.tenant.region ? " · region " + d.tenant.region : "")
-        : "No Microsoft 365 tenant for this domain"));
-    }
+    var meta = [];
+    if (d.provider) meta.push(d.provider);
+    if (d.tenant && d.tenant.found) meta.push("Microsoft 365 tenant " + d.tenant.id + (d.tenant.region ? " · region " + d.tenant.region : ""));
+    if (meta.length) title.appendChild(el("div", "tenant", meta.join(" · ")));
     hd.appendChild(title);
     hd.appendChild(pill(d.overall));
     art.appendChild(hd);

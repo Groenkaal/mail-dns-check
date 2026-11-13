@@ -1,18 +1,38 @@
 /* Mail DNS checks for the browser (and node, for testing).
- * Mirrors python/check_mail_dns.py and powershell/Check-MailDns.ps1.
+ * Works for any mail provider. Mirrors python/check_mail_dns.py and powershell/Check-MailDns.ps1.
  * Lookups go over DNS-over-HTTPS: Google first, Cloudflare as fallback.
  */
 (function (root) {
   "use strict";
 
-  var MS_SPF_INCLUDE = "spf.protection.outlook.com";
-  var MS_MX_SUFFIXES = [".mail.protection.outlook.com", ".mx.microsoft"];
+  // Keep PROVIDERS and COMMON_SELECTORS in step with python/check_mail_dns.py and powershell/Check-MailDns.ps1.
+  var MAIL_PROVIDERS = [
+    { name: "Microsoft 365", mx: [".mail.protection.outlook.com", ".mx.microsoft"], spf: ["spf.protection.outlook.com"], dkim: ["selector1", "selector2"] },
+    { name: "Google Workspace", mx: [".google.com", ".googlemail.com"], spf: ["_spf.google.com"], dkim: ["google"] },
+    { name: "Zoho Mail", mx: [".zoho.com", ".zoho.eu", ".zoho.in", ".zoho.com.au", ".zohomail.com"],
+      spf: ["zoho.com", "zoho.eu", "zoho.in", "zoho.com.au", "zohomail.com", "one.zoho.com", "one.zoho.eu"], dkim: ["zoho", "zmail"] },
+    { name: "Proton Mail", mx: [".protonmail.ch"], spf: ["_spf.protonmail.ch"], dkim: ["protonmail", "protonmail2", "protonmail3"] },
+    { name: "Fastmail", mx: [".messagingengine.com"], spf: ["spf.messagingengine.com"], dkim: ["fm1", "fm2", "fm3"] },
+    { name: "iCloud Mail", mx: [".mail.icloud.com"], spf: ["icloud.com"], dkim: ["sig1"] },
+    { name: "Yandex Mail", mx: [".yandex.net", ".yandex.ru"], spf: ["_spf.yandex.net"], dkim: ["mail"] },
+    { name: "Mimecast", mx: [".mimecast.com", ".mimecast.co.za"], spf: [], dkim: [], gateway: true },
+    { name: "Proofpoint", mx: [".pphosted.com", ".ppe-hosted.com"], spf: [], dkim: [], gateway: true },
+    { name: "Barracuda", mx: [".barracudanetworks.com"], spf: [], dkim: [], gateway: true },
+    { name: "Cisco Secure Email", mx: [".iphmx.com"], spf: [], dkim: [], gateway: true }
+  ];
+  var MS_DKIM_SELECTORS = ["selector1", "selector2"];
   var MS_DKIM_SUFFIXES = [".onmicrosoft.com", ".dkim.mail.microsoft"];
-  var DKIM_SELECTORS = ["selector1", "selector2"];
+  var COMMON_SELECTORS = [
+    "selector1", "selector2", "google",
+    "default", "dkim", "mail", "email", "smtp", "mx", "key1", "key2", "dk",
+    "k1", "k2", "k3", "s1", "s2", "zoho", "zmail",
+    "protonmail", "protonmail2", "protonmail3", "fm1", "fm2", "fm3", "sig1",
+    "hs1", "hs2", "mandrill", "mxvault", "everlytickey1", "everlytickey2",
+    "zendesk1", "zendesk2", "kl", "kl2"
+  ];
   var SPF_LOOKUP_LIMIT = 10;
   var SEVERITY = { pass: 0, info: 0, warn: 1, fail: 2 };
   var TYPE_NUM = { TXT: 16, MX: 15, CNAME: 5 };
-  var STANDBY_TAIL = "Microsoft Defender portal.";
 
   var PROVIDERS = [
     { name: "dns.google", url: function (n, t) { return "https://dns.google/resolve?name=" + encodeURIComponent(n) + "&type=" + t; } },
@@ -27,6 +47,11 @@
   }
   function finding(level, text) { return { level: level, text: text }; }
   function stripDot(s) { return s.replace(/\.$/, ""); }
+  function unique(list) { return list.filter(function (v, i) { return list.indexOf(v) === i; }); }
+  function nameList(items, limit) {
+    limit = limit || 6;
+    return items.length <= limit ? items.join(", ") : items.slice(0, limit).join(", ") + " and " + (items.length - limit) + " more";
+  }
 
   function parseTxt(data) {
     if (data.charAt(0) !== '"') return data;
@@ -71,22 +96,36 @@
   }
 
   // ------------------------------------------------------------------ MX
-  async function checkMx(q, domain) {
-    var mx = (await q(domain, "MX")).slice().sort(function (a, b) { return parseInt(a) - parseInt(b); });
+  async function mxRecords(q, domain) {
+    return (await q(domain, "MX")).slice().sort(function (a, b) {
+      var d = parseInt(a) - parseInt(b), ha = a.split(" ")[1].toLowerCase(), hb = b.split(" ")[1].toLowerCase();
+      return d || (ha < hb ? -1 : ha > hb ? 1 : 0);
+    });
+  }
+
+  function detectProvider(mx) {
+    for (var i = 0; i < mx.length; i++) {
+      var host = (mx[i].split(" ")[1] || "").toLowerCase();
+      for (var j = 0; j < MAIL_PROVIDERS.length; j++) if (endsWithAny(host, MAIL_PROVIDERS[j].mx)) return MAIL_PROVIDERS[j];
+    }
+    return null;
+  }
+
+  function checkMx(domain, mx, provider) {
     var findings = [];
     if (!mx.length) return { status: "fail", summary: "No MX records. The domain cannot receive mail.", records: [], findings: findings };
     var hosts = mx.map(function (r) { return (r.split(" ")[1] || "").toLowerCase(); });
     if (hosts.length === 1 && hosts[0] === "")
       return { status: "info", summary: "Null MX (RFC 7505). The domain states it accepts no mail.", records: ["0 ."], findings: findings };
-    var status, summary;
-    if (hosts.some(function (h) { return endsWithAny(h, MS_MX_SUFFIXES); })) {
-      status = "pass"; summary = "Mail is routed to Exchange Online.";
-      if (mx.length > 1) findings.push(finding("info", mx.length + " MX records. Microsoft 365 normally needs only one."));
-    } else {
-      status = "info"; summary = "Mail is not routed to Microsoft 365.";
-      findings.push(finding("info", "MX points elsewhere, e.g. a third-party gateway or another provider."));
-    }
-    return { status: status, summary: summary, records: mx, findings: findings };
+    var summary;
+    if (provider && provider.gateway) {
+      summary = "Mail goes through " + provider.name + " (security gateway).";
+      findings.push(finding("info", "The mailbox provider behind the gateway can't be seen from DNS."));
+    } else if (provider) summary = "Mail is handled by " + provider.name + ".";
+    else summary = "Mail is handled by " + hosts[0] + ".";
+    var mixed = hosts.indexOf("") >= 0;
+    if (mixed) findings.push(finding("warn", "A null MX (.) is mixed with real MX hosts. Remove one or the other."));
+    return { status: mixed ? "warn" : "pass", summary: summary, records: mx, findings: findings };
   }
 
   // ------------------------------------------------------------------ SPF
@@ -121,10 +160,13 @@
     return { count: count, problems: problems };
   }
 
-  async function checkSpf(q, domain) {
+  async function checkSpf(q, domain, provider) {
     var recs = await spfRecords(q, domain);
-    if (!recs.length) return { status: "fail", summary: "No SPF record. Receivers cannot verify who may send for this domain.",
-      records: [], findings: [finding("fail", "Add TXT: v=spf1 include:" + MS_SPF_INCLUDE + " -all")] };
+    if (!recs.length) {
+      var example = provider && provider.spf.length ? "v=spf1 include:" + provider.spf[0] + " -all" : "v=spf1 mx -all";
+      return { status: "fail", summary: "No SPF record. Receivers cannot verify who may send for this domain.",
+        records: [], findings: [finding("fail", "Add a TXT record such as: " + example)] };
+    }
     if (recs.length > 1) return { status: "fail", summary: recs.length + " SPF records. SPF fails when more than one exists.",
       records: recs, findings: [finding("fail", "Merge them into a single v=spf1 record.")] };
 
@@ -132,8 +174,15 @@
     var terms = rec.split(/\s+/).slice(1).map(function (t) { return t.toLowerCase(); });
     var findings = [], statuses = ["pass"];
 
-    if (terms.indexOf("include:" + MS_SPF_INCLUDE) >= 0) findings.push(finding("pass", "Includes " + MS_SPF_INCLUDE + " (Microsoft 365)."));
-    else { findings.push(finding("warn", "Does not include " + MS_SPF_INCLUDE + ". Microsoft 365 mail will fail SPF.")); statuses.push("warn"); }
+    if (provider && provider.spf.length) {
+      var hit = provider.spf.find(function (inc) { return terms.indexOf("include:" + inc) >= 0; });
+      if (hit) findings.push(finding("pass", "Includes " + hit + " (" + provider.name + ")."));
+      else {
+        findings.push(finding("warn", "MX points to " + provider.name + ", but SPF does not include " + provider.spf[0] +
+          ". Mail sent from " + provider.name + " will fail SPF."));
+        statuses.push("warn");
+      }
+    }
 
     var allTerm = terms.find(function (t) { return t.replace(/^[+\-~?]/, "") === "all"; });
     var redirect = terms.find(function (t) { return t.startsWith("redirect="); });
@@ -161,46 +210,73 @@
   }
 
   // ------------------------------------------------------------------ DKIM
-  async function checkDkim(q, domain) {
-    var findings = [], records = [], good = 0, standby = 0;
-    var prefix = domain.replace(/\./g, "-");
-    for (var i = 0; i < DKIM_SELECTORS.length; i++) {
-      var sel = DKIM_SELECTORS[i];
-      var name = sel + "._domainkey." + domain;
-      var cn = await q(name, "CNAME");
-      var target = cn[0] || null;
-      var txt = (await q(name, "TXT")).filter(function (t) { return t.replace(/\s/g, "").indexOf("p=") >= 0; });
-      if (target) {
-        records.push({ host: name + " CNAME", value: target });
-        if (!endsWithAny(target, MS_DKIM_SUFFIXES)) findings.push(finding("warn", sel + " points outside Microsoft 365 (" + target + ")."));
-        else if (!target.toLowerCase().startsWith((sel + "-" + prefix).toLowerCase())) findings.push(finding("info", sel + " target name does not match " + sel + "-" + prefix + "."));
-      }
-      if (txt.length) {
-        var key = txt[0];
-        var mm = /(?:^|;)p=([^;]*)/.exec(key.replace(/\s/g, ""));
-        if (mm && mm[1]) {
-          good++;
-          if (!target) records.push({ host: name + " TXT", value: key.length > 120 ? key.slice(0, 120) + "…" : key });
-          findings.push(finding("pass", sel + ": public key published."));
-        } else findings.push(finding("fail", sel + ": key is empty (p=), so the key is revoked."));
-      } else if (target) {
-        standby++;
-        findings.push(finding("warn", sel + ": CNAME exists but the target has no key. Enable DKIM signing for this domain in the " + STANDBY_TAIL));
-      } else findings.push(finding("fail", sel + ": no record at " + name + "."));
-    }
+  async function dkimKey(q, domain, sel) {
+    var txt = (await q(sel + "._domainkey." + domain, "TXT")).filter(function (t) { return t.replace(/ /g, "").indexOf("p=") >= 0; });
+    return txt.length ? txt[0] : null;
+  }
+
+  async function checkDkim(q, domain, provider, extra, acceptsMail) {
+    var selectors = unique(COMMON_SELECTORS.concat(provider ? provider.dkim : [], extra || []));
+    var keys = await Promise.all(selectors.map(function (s) { return dkimKey(q, domain, s); }));
+    var msTargets = await Promise.all(MS_DKIM_SELECTORS.map(function (s) {
+      return q(s + "._domainkey." + domain, "CNAME").then(function (r) { return r[0] || null; });
+    }));
+    var msCnames = {};
+    MS_DKIM_SELECTORS.forEach(function (s, i) { msCnames[s] = msTargets[i]; });
+
+    var active = [], revoked = [];
+    selectors.forEach(function (sel, i) {
+      var key = keys[i];
+      if (key == null) return;
+      var m = /(?:^|;)p=([^;]*)/.exec(key.replace(/ /g, ""));
+      (m && m[1] ? active : revoked).push([sel, key]);
+    });
+
+    var findings = [], records = [];
+    var activeNames = active.map(function (a) { return a[0]; });
+    var isMs = !!(provider && provider.name === "Microsoft 365");
+
+    active.forEach(function (a) {
+      var sel = a[0], key = a[1], target = msCnames[sel];
+      if (target) records.push({ host: sel + "._domainkey." + domain + " CNAME", value: target });
+      else records.push({ host: sel + "._domainkey." + domain + " TXT", value: key.length > 120 ? key.slice(0, 120) + "…" : key });
+      findings.push(finding("pass", sel + ": public key published."));
+    });
+
+    // Microsoft 365 publishes DKIM as CNAMEs at selector1/selector2. One can sit without a key between rotations.
+    var standby = MS_DKIM_SELECTORS.filter(function (s) { return msCnames[s] && activeNames.indexOf(s) < 0; });
+    var msActive = MS_DKIM_SELECTORS.filter(function (s) { return activeNames.indexOf(s) >= 0; });
+    var expected = domain.replace(/\./g, "-");
+    MS_DKIM_SELECTORS.forEach(function (sel) {
+      var target = msCnames[sel];
+      if (!target || !(isMs || endsWithAny(target, MS_DKIM_SUFFIXES))) return;
+      if (standby.indexOf(sel) >= 0) records.push({ host: sel + "._domainkey." + domain + " CNAME", value: target });
+      if (isMs && !endsWithAny(target, MS_DKIM_SUFFIXES)) findings.push(finding("warn", sel + " points outside Microsoft 365 (" + target + ")."));
+      else if (endsWithAny(target, MS_DKIM_SUFFIXES) && !target.toLowerCase().startsWith(sel + "-" + expected))
+        findings.push(finding("info", sel + " target name does not match " + sel + "-" + expected + "."));
+    });
+    standby.forEach(function (sel) {
+      if (msActive.length) findings.push(finding("info", sel + ": standby selector, no key yet. Normal between rotations."));
+      else findings.push(finding("warn", sel + ": CNAME exists but the target has no key. Enable DKIM signing for this domain in the Microsoft Defender portal."));
+    });
+    if (isMs && !msActive.length && !standby.length)
+      findings.push(finding("warn", "Microsoft 365 DKIM is not set up (no selector1/selector2). Microsoft 365 then signs with your onmicrosoft.com domain, which does not align for DMARC."));
+    if (provider && provider.name === "Google Workspace" && activeNames.indexOf("google") < 0)
+      findings.push(finding("info", "Google Workspace's default selector (google) has no key. A custom selector may be in use."));
+    if (revoked.length) findings.push(finding("info", "Empty (revoked) key at: " + nameList(revoked.map(function (r) { return r[0]; })) + "."));
 
     var status, summary;
-    if (good === DKIM_SELECTORS.length) { status = "pass"; summary = "Both Microsoft 365 DKIM selectors are published."; }
-    else if (good && standby) {
-      status = "pass"; summary = "DKIM signing is active. The other selector is on standby for key rotation.";
-      findings.forEach(function (f) {
-        if (f.text.endsWith(STANDBY_TAIL)) { f.level = "info"; f.text = f.text.split(":")[0] + ": standby selector, no key yet. Normal between rotations."; }
-      });
+    if (active.length) {
+      status = "pass";
+      summary = "DKIM key found at " + active.length + " selector" + (active.length > 1 ? "s" : "") + ": " + nameList(activeNames) + ".";
+      if (findings.some(function (f) { return f.level === "warn" || f.level === "fail"; })) status = "warn";
+    } else if (standby.length) { status = "warn"; summary = "DKIM CNAMEs exist but no key is published. Signing is not enabled yet."; }
+    else if (revoked.length && !acceptsMail) { status = "info"; summary = "Only empty (revoked) keys found. Typical for a domain that sends no mail."; }
+    else if (revoked.length) { status = "warn"; summary = "Only empty (revoked) keys found. Active keys may be under a selector not checked here."; }
+    else {
+      status = "warn"; summary = "No DKIM key found on the " + selectors.length + " common selectors checked.";
+      findings.push(finding("warn", "DKIM may still be set up under a custom selector. Add it to the selector list to check it."));
     }
-    else if (good) { status = "warn"; summary = "Only one DKIM selector is published. Key rotation will break signing."; }
-    else if (standby) { status = "warn"; summary = "DKIM CNAMEs exist but no key is published. Signing is not enabled yet."; }
-    else { status = "fail"; summary = "No Microsoft 365 DKIM key found."; }
-    if (status === "pass" && findings.some(function (f) { return f.level === "warn" || f.level === "fail"; })) status = "warn";
     return { status: status, summary: summary, records: records, findings: findings };
   }
 
@@ -256,19 +332,32 @@
   }
 
   // ------------------------------------------------------------------ Run
-  async function safe(fn, q, domain) {
-    try { return await fn(q, domain); }
-    catch (e) { return { status: "fail", summary: "Lookup error.", records: [], findings: [finding("fail", e.message)] }; }
+  function errorCheck(e) { return { status: "fail", summary: "Lookup error.", records: [], findings: [finding("fail", e.message)] }; }
+
+  async function checkDomain(q, domain, opts) {
+    opts = opts || {};
+    var provider = null, mxCheck, mx = [];
+    try {
+      mx = await mxRecords(q, domain);
+      provider = detectProvider(mx);
+      mxCheck = checkMx(domain, mx, provider);
+    } catch (e) { mxCheck = errorCheck(e); }
+    var r = await Promise.all([
+      checkSpf(q, domain, provider).catch(errorCheck),
+      checkDkim(q, domain, provider, opts.selectors, mx.some(function (r) { return !!r.split(" ")[1]; })).catch(errorCheck),
+      checkDmarc(q, domain).catch(errorCheck),
+      lookupTenant(domain, opts.fetch)
+    ]);
+    var checks = { mx: mxCheck, spf: r[0], dkim: r[1], dmarc: r[2] };
+    var overall = worst(checks.spf.status, checks.dkim.status, checks.dmarc.status, checks.mx.status === "fail" ? "fail" : "pass");
+    var out = { domain: domain, overall: overall, provider: provider ? provider.name : null, checks: checks };
+    if (r[3]) out.tenant = r[3];
+    return out;
   }
 
-  async function checkDomain(q, domain, fetchImpl) {
-    var r = await Promise.all([safe(checkMx, q, domain), safe(checkSpf, q, domain), safe(checkDkim, q, domain),
-      safe(checkDmarc, q, domain), lookupTenant(domain, fetchImpl)]);
-    var checks = { mx: r[0], spf: r[1], dkim: r[2], dmarc: r[3] };
-    var overall = worst(checks.spf.status, checks.dkim.status, checks.dmarc.status, checks.mx.status === "fail" ? "fail" : "pass");
-    var out = { domain: domain, overall: overall, checks: checks };
-    if (r[4]) out.tenant = r[4];
-    return out;
+  function parseSelectorList(text) {
+    return unique((text || "").toLowerCase().split(/[,;\s]+/).map(function (s) { return s.replace(/\._domainkey.*$/, "").trim(); })
+      .filter(function (s) { return /^[a-z0-9._-]+$/.test(s); }));
   }
 
   function parseDomainList(text) {
@@ -282,7 +371,8 @@
     return out;
   }
 
-  var api = { createResolver: createResolver, checkDomain: checkDomain, parseDomainList: parseDomainList, lookupTenant: lookupTenant };
+  var api = { createResolver: createResolver, checkDomain: checkDomain, parseDomainList: parseDomainList,
+    parseSelectorList: parseSelectorList, lookupTenant: lookupTenant, commonSelectorCount: COMMON_SELECTORS.length };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.MailDnsChecks = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
