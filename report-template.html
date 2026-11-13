@@ -138,6 +138,8 @@ article.domain > header {
   padding: 16px 20px; border-bottom: 1px solid var(--rule);
 }
 article.domain h2 { font-family: var(--font-mono); font-weight: 500; font-size: var(--step-1); overflow-wrap: anywhere; }
+.dom-title { display: grid; gap: 2px; min-width: 0; }
+.tenant { font: 400 var(--step--1)/1.4 var(--font-mono); color: var(--ink-soft); overflow-wrap: anywhere; }
 .checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .check { padding: 18px 20px; display: grid; gap: 10px; align-content: start; border-top: 1px solid var(--rule); }
 .check:nth-child(-n+2) { border-top: 0; }
@@ -284,7 +286,14 @@ body.only-issues [data-overall="pass"] { display: none; }
     art.id = slug(d.domain);
     art.dataset.overall = d.overall;
     var hd = el("header");
-    hd.appendChild(el("h2", null, d.domain));
+    var title = el("div", "dom-title");
+    title.appendChild(el("h2", null, d.domain));
+    if (d.tenant) {
+      title.appendChild(el("div", "tenant", d.tenant.found
+        ? "Microsoft 365 tenant " + d.tenant.id + (d.tenant.region ? " · region " + d.tenant.region : "")
+        : "No Microsoft 365 tenant for this domain"));
+    }
+    hd.appendChild(title);
     hd.appendChild(pill(d.overall));
     art.appendChild(hd);
 

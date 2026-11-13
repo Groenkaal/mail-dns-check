@@ -16,6 +16,8 @@ import argparse
 import json
 import re
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,18 +40,30 @@ SEVERITY = {"pass": 0, "info": 0, "warn": 1, "fail": 2}
 
 resolver = dns.resolver.Resolver()
 resolver.lifetime = 6.0
+# Some local resolvers (home routers, systemd-resolved) silently drop large TXT
+# answers. When the system resolver returns no TXT, ask a public one to be sure.
+public_resolver = dns.resolver.Resolver(configure=False)
+public_resolver.nameservers = ["1.1.1.1", "8.8.8.8"]
+public_resolver.lifetime = 6.0
+use_public_fallback = True
 
 
 # --------------------------------------------------------------------------- DNS
 
 def query(name: str, rtype: str) -> list[str]:
     """Return record strings, [] when the name or type does not exist."""
-    try:
-        answer = resolver.resolve(name, rtype)
-    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.NoNameservers):
+    answer = None
+    for r in ([resolver, public_resolver] if rtype == "TXT" and use_public_fallback else [resolver]):
+        try:
+            answer = r.resolve(name, rtype)
+            break
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.NoNameservers):
+            continue
+        except dns.exception.Timeout:
+            if r is resolver:
+                raise RuntimeError(f"DNS timeout looking up {rtype} {name}")
+    if answer is None:
         return []
-    except dns.exception.Timeout:
-        raise RuntimeError(f"DNS timeout looking up {rtype} {name}")
     out = []
     for r in answer:
         if rtype == "TXT":
@@ -312,12 +326,30 @@ def safe(fn, domain: str) -> dict:
         return {"status": "fail", "summary": "Lookup error.", "records": [], "findings": [finding("fail", str(e))]}
 
 
+def lookup_tenant(domain: str) -> dict | None:
+    """Microsoft Entra tenant behind the domain, from the public OpenID configuration."""
+    url = f"https://login.microsoftonline.com/{domain}/.well-known/openid-configuration"
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        return {"found": False} if e.code == 400 else None
+    except Exception:
+        return None
+    m = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", data.get("issuer", ""), re.I)
+    return {"found": True, "id": m.group(0), "region": data.get("tenant_region_scope", "")} if m else {"found": False}
+
+
 def check_domain(domain: str) -> dict:
     checks = {"mx": safe(check_mx, domain), "spf": safe(check_spf, domain),
               "dkim": safe(check_dkim, domain), "dmarc": safe(check_dmarc, domain)}
     overall = worst(checks["spf"]["status"], checks["dkim"]["status"], checks["dmarc"]["status"],
                     "fail" if checks["mx"]["status"] == "fail" else "pass")
-    return {"domain": domain, "overall": overall, "checks": checks}
+    result = {"domain": domain, "overall": overall, "checks": checks}
+    tenant = lookup_tenant(domain)
+    if tenant:
+        result["tenant"] = tenant
+    return result
 
 
 def read_domains(path: Path) -> list[str]:
@@ -347,8 +379,10 @@ def main() -> int:
     ap.add_argument("-n", "--nameserver", help="DNS server to query instead of the system resolver")
     args = ap.parse_args()
 
+    global use_public_fallback
     if args.nameserver:
         resolver.nameservers = [args.nameserver]
+        use_public_fallback = False
     if args.domain:
         domains = list(dict.fromkeys(d.strip().lower().rstrip(".") for arg in args.domain for d in arg.split(",") if d.strip()))
         source = "command line"

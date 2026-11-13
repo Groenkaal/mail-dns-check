@@ -10,7 +10,7 @@
     the report template from the repo, and you pass -Domains or -Domain.
 
     On Windows it uses Resolve-DnsName. Where that cmdlet is missing (PowerShell 7 on
-    Linux/macOS) it falls back to DNS-over-HTTPS via Cloudflare.
+    Linux/macOS) it falls back to DNS-over-HTTPS via Google (dns.google).
 
 .EXAMPLE
     .\Check-MailDns.ps1
@@ -51,7 +51,7 @@ $UseNative      = [bool](Get-Command Resolve-DnsName -ErrorAction SilentlyContin
 # ----------------------------------------------------------------------------- DNS
 
 function Invoke-DohQuery([string]$Name, [string]$Type) {
-    $uri = "https://cloudflare-dns.com/dns-query?name=$([uri]::EscapeDataString($Name))&type=$Type"
+    $uri = "https://dns.google/resolve?name=$([uri]::EscapeDataString($Name))&type=$Type"
     $resp = Invoke-RestMethod -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10
     $typeNum = @{ TXT = 16; MX = 15; CNAME = 5 }[$Type]
     if (-not ($resp.PSObject.Properties.Name -contains 'Answer')) { return @() }
@@ -368,6 +368,23 @@ function Invoke-Safe([scriptblock]$Check, [string]$Domain) {
     catch { New-Check 'fail' 'Lookup error.' @() @(New-Finding 'fail' "$_") }
 }
 
+function Get-Tenant([string]$Domain) {
+    # Microsoft Entra tenant behind the domain, from the public OpenID configuration.
+    try {
+        $cfg = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$Domain/.well-known/openid-configuration" -TimeoutSec 8
+    }
+    catch {
+        $code = $null
+        if ($_.Exception.PSObject.Properties.Name -contains 'Response' -and $_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+        if ($code -eq 400) { return [ordered]@{ found = $false } } else { return $null }
+    }
+    if ($cfg.issuer -match '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}') {
+        $region = if ($cfg.PSObject.Properties.Name -contains 'tenant_region_scope') { [string]$cfg.tenant_region_scope } else { '' }
+        return [ordered]@{ found = $true; id = $Matches[0]; region = $region }
+    }
+    return [ordered]@{ found = $false }
+}
+
 function Test-Domain([string]$Domain) {
     $checks = [ordered]@{
         mx    = Invoke-Safe ${function:Test-Mx}    $Domain
@@ -377,7 +394,10 @@ function Test-Domain([string]$Domain) {
     }
     $mxPart = if ($checks.mx.status -eq 'fail') { 'fail' } else { 'pass' }
     $overall = Get-Worst @($checks.spf.status, $checks.dkim.status, $checks.dmarc.status, $mxPart)
-    return [ordered]@{ domain = $Domain; overall = $overall; checks = $checks }
+    $result = [ordered]@{ domain = $Domain; overall = $overall; checks = $checks }
+    $tenant = Get-Tenant $Domain
+    if ($tenant) { $result.tenant = $tenant }
+    return $result
 }
 
 # Domains: -Domain wins, then -Domains <file>, then domains.txt in the repo root.
@@ -430,7 +450,7 @@ foreach ($d in $domains) {
     $results += $r
 }
 
-$resolverName = if ($NameServer -and $UseNative) { $NameServer } elseif ($UseNative) { 'system' } else { 'cloudflare-dns.com (DNS over HTTPS)' }
+$resolverName = if ($NameServer -and $UseNative) { $NameServer } elseif ($UseNative) { 'system' } else { 'dns.google (DNS over HTTPS)' }
 $report = [ordered]@{
     generated = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     tool      = "PowerShell $($PSVersionTable.PSVersion)"

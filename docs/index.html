@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mail DNS Check</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Check SPF, DKIM, DMARC, MX and the Microsoft 365 tenant for a list of domains, right in the browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&display=swap">
+<style>
+/* Layout: one working column. Domain input on top, then the same summary matrix and per-domain sheets as the downloadable report. */
+:root {
+  --ground: #f3f5f6;
+  --sheet: #ffffff;
+  --ink: #17232b;
+  --ink-soft: #55656f;
+  --rule: #d9e0e4;
+  --accent: #0e5a7e;
+  --accent-ink: #ffffff;
+  --code-bg: #eef2f4;
+
+  --pass: #1d7a46;  --pass-bg: #e3f3e9;
+  --warn: #8a5a00;  --warn-bg: #fbefd6;
+  --fail: #b3261e;  --fail-bg: #fbe4e2;
+  --info: #4a5d6b;  --info-bg: #e7edf1;
+
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+  --step-3: 2.125rem;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0f161b; --sheet: #172128; --ink: #e3eaee; --ink-soft: #93a4ae; --rule: #2a3843;
+    --accent: #5fb4dc; --accent-ink: #0b1418; --code-bg: #0f181e;
+    --pass: #6fd29a; --pass-bg: #163526; --warn: #f0bf5a; --warn-bg: #3a2c0f;
+    --fail: #ff8f86; --fail-bg: #43191a; --info: #a9bac5; --info-bg: #23313b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0f161b; --sheet: #172128; --ink: #e3eaee; --ink-soft: #93a4ae; --rule: #2a3843;
+  --accent: #5fb4dc; --accent-ink: #0b1418; --code-bg: #0f181e;
+  --pass: #6fd29a; --pass-bg: #163526; --warn: #f0bf5a; --warn-bg: #3a2c0f;
+  --fail: #ff8f86; --fail-bg: #43191a; --info: #a9bac5; --info-bg: #23313b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 var(--step-0)/1.55 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding-block: 32px 64px; display: grid; gap: 28px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 700; margin: 0; text-wrap: balance; line-height: 1.15; }
+p { margin: 0; }
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible, textarea:focus-visible, .file-btn:focus-within {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.label { font-size: var(--step--1); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+.mono { font-family: var(--font-mono); }
+
+header.top { display: grid; gap: 12px; border-bottom: 2px solid var(--ink); padding-bottom: 18px; }
+header.top h1 { font-size: var(--step-3); letter-spacing: -0.01em; }
+header.top h1 span { color: var(--accent); }
+header.top p { color: var(--ink-soft); max-width: 68ch; }
+
+/* Input */
+.input { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 18px 20px; display: grid; gap: 12px; }
+.input label.label { display: block; }
+textarea {
+  width: 100%; min-height: 128px; resize: vertical;
+  font: 400 0.875rem/1.6 var(--font-mono); color: var(--ink);
+  background: var(--code-bg); border: 1px solid var(--rule); border-radius: 3px; padding: 10px 12px;
+}
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.btn {
+  font: 600 var(--step-0) var(--font-body); border-radius: 3px; cursor: pointer;
+  padding: 9px 16px; border: 1px solid var(--rule); background: var(--sheet); color: var(--ink);
+}
+.btn:hover { border-color: var(--ink-soft); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: 0.55; cursor: default; filter: none; }
+.file-btn { position: relative; overflow: hidden; display: inline-block; }
+.file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.status { font-size: var(--step--1); color: var(--ink-soft); }
+.status.error { color: var(--fail); }
+
+.notice { font-size: var(--step--1); padding: 10px 14px; border-radius: 3px; background: var(--info-bg); color: var(--ink); }
+
+/* Results toolbar */
+.bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; }
+.bar-right { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.tally { display: flex; flex-wrap: wrap; gap: 10px; }
+.tally div { display: flex; align-items: baseline; gap: 8px; padding: 6px 12px; border-radius: 4px; background: var(--sheet); border: 1px solid var(--rule); }
+.tally strong { font: 600 var(--step-2)/1 var(--font-display); font-variant-numeric: tabular-nums; }
+.tally .t-pass strong { color: var(--pass); }
+.tally .t-warn strong { color: var(--warn); }
+.tally .t-fail strong { color: var(--fail); }
+.filter { display: inline-flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; background: var(--sheet); }
+.filter button { font: 500 var(--step--1) var(--font-body); color: var(--ink-soft); background: transparent; border: 0; padding: 8px 14px; cursor: pointer; }
+.filter button + button { border-left: 1px solid var(--rule); }
+.filter button[aria-pressed="true"] { background: var(--ink); color: var(--sheet); }
+
+/* Pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 600 0.75rem/1 var(--font-body); letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pill.pass { color: var(--pass); background: var(--pass-bg); }
+.pill.warn { color: var(--warn); background: var(--warn-bg); }
+.pill.fail { color: var(--fail); background: var(--fail-bg); }
+.pill.info { color: var(--info); background: var(--info-bg); }
+.pill.pending { color: var(--ink-soft); background: transparent; box-shadow: inset 0 0 0 1px var(--rule); }
+@media (prefers-reduced-motion: no-preference) {
+  .pill.pending::before { animation: blink 1s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: 0.2; } }
+}
+
+/* Matrix */
+.matrix-scroll { overflow-x: auto; background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; }
+table.matrix { width: 100%; border-collapse: collapse; min-width: 560px; }
+.matrix th, .matrix td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
+.matrix thead th { background: var(--code-bg); }
+.matrix tbody tr:last-child td { border-bottom: 0; }
+.matrix td.dom a { font-family: var(--font-mono); font-weight: 500; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; }
+.matrix td.dom a:hover { color: var(--accent); text-decoration: underline; }
+
+/* Domain sheets */
+.domains { display: grid; gap: 24px; }
+article.domain { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; scroll-margin-top: 16px; }
+article.domain > header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--rule); }
+article.domain h2 { font-family: var(--font-mono); font-weight: 500; font-size: var(--step-1); overflow-wrap: anywhere; }
+.dom-title { display: grid; gap: 2px; min-width: 0; }
+.tenant { font: 400 var(--step--1)/1.4 var(--font-mono); color: var(--ink-soft); overflow-wrap: anywhere; }
+.checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.check { padding: 18px 20px; display: grid; gap: 10px; align-content: start; border-top: 1px solid var(--rule); }
+.check:nth-child(-n+2) { border-top: 0; }
+.check:nth-child(odd) { border-right: 1px solid var(--rule); }
+.check-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.check-head h3 { font-size: var(--step-1); letter-spacing: 0.02em; }
+.check-head h3 small { font: 400 var(--step--1) var(--font-body); color: var(--ink-soft); letter-spacing: 0; margin-left: 6px; }
+.summary { font-weight: 500; }
+.records { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.records li { font: 400 0.8125rem/1.5 var(--font-mono); background: var(--code-bg); color: var(--ink); padding: 7px 10px; border-radius: 3px; overflow-wrap: anywhere; }
+.records li .host { display: block; color: var(--ink-soft); font-size: 0.75rem; }
+.findings { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: var(--step--1); }
+.findings li { display: grid; grid-template-columns: 14px 1fr; gap: 8px; align-items: baseline; }
+.findings li::before { content: ""; width: 8px; height: 8px; border-radius: 2px; transform: translateY(-1px); }
+.findings li.pass::before { background: var(--pass); }
+.findings li.warn::before { background: var(--warn); }
+.findings li.fail::before { background: var(--fail); }
+.findings li.info::before { background: var(--info); }
+.empty { color: var(--ink-soft); font-style: italic; font-size: var(--step--1); }
+
+/* Empty state */
+.intro { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; }
+.intro div { padding: 16px 18px; display: grid; gap: 6px; align-content: start; }
+.intro div + div { border-left: 1px solid var(--rule); }
+.intro h3 { font-size: var(--step-1); }
+.intro p { font-size: var(--step--1); color: var(--ink-soft); }
+
+footer { font-size: var(--step--1); color: var(--ink-soft); border-top: 1px solid var(--rule); padding-top: 14px; display: grid; gap: 6px; }
+
+body.only-issues [data-overall="pass"] { display: none; }
+
+@media (max-width: 720px) {
+  .checks { grid-template-columns: 1fr; }
+  .check:nth-child(odd) { border-right: 0; }
+  .check:nth-child(2) { border-top: 1px solid var(--rule); }
+  .intro { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .intro div:nth-child(3) { border-left: 0; }
+  .intro div:nth-child(n+3) { border-top: 1px solid var(--rule); }
+  header.top h1 { font-size: var(--step-2); }
+}
+@media (max-width: 440px) {
+  .intro { grid-template-columns: 1fr; }
+  .intro div + div { border-left: 0; border-top: 1px solid var(--rule); }
+}
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="label">SPF · DKIM · DMARC · Microsoft 365</div>
+    <h1>Mail DNS <span>Check</span></h1>
+    <p>Paste domains to check their mail authentication records against Microsoft 365. Lookups run in your browser over DNS-over-HTTPS. Nothing is sent anywhere else.</p>
+  </header>
+
+  <form class="input" id="form">
+    <label class="label" for="domains">Domains, one per line or comma-separated</label>
+    <textarea id="domains" spellcheck="false" autocapitalize="off" placeholder="contoso.com&#10;fabrikam.com"></textarea>
+    <div class="actions">
+      <button class="btn primary" type="submit" id="run">Check domains</button>
+      <span class="btn file-btn">Load .txt file<input type="file" id="file" accept=".txt,.csv,text/plain" aria-label="Load domain list from a text file"></span>
+      <span class="status" id="status" role="status" aria-live="polite"></span>
+    </div>
+  </form>
+
+  <div class="notice" id="notice" hidden></div>
+
+  <section class="intro" id="intro" aria-label="What is checked">
+    <div><h3>MX</h3><p>Mail routes to Exchange Online (<span class="mono">*.mail.protection.outlook.com</span>).</p></div>
+    <div><h3>SPF</h3><p>One record, includes <span class="mono">spf.protection.outlook.com</span>, safe <span class="mono">all</span>, at most 10 lookups.</p></div>
+    <div><h3>DKIM</h3><p><span class="mono">selector1</span> and <span class="mono">selector2</span> CNAMEs point to Microsoft and publish a key.</p></div>
+    <div><h3>DMARC</h3><p>One record with <span class="mono">p=quarantine</span> or <span class="mono">reject</span> and a reporting address.</p></div>
+  </section>
+
+  <section id="results" hidden>
+    <div style="display:grid;gap:20px">
+      <div class="bar">
+        <div class="tally" id="tally"></div>
+        <div class="bar-right">
+          <div class="filter" role="group" aria-label="Filter domains">
+            <button type="button" id="f-all" aria-pressed="true">All domains</button>
+            <button type="button" id="f-issues" aria-pressed="false">Needs attention</button>
+          </div>
+          <button class="btn" type="button" id="download" disabled>Download report</button>
+        </div>
+      </div>
+      <div class="matrix-scroll">
+        <table class="matrix">
+          <thead><tr>
+            <th class="label">Domain</th><th class="label">MX</th><th class="label">SPF</th>
+            <th class="label">DKIM</th><th class="label">DMARC</th><th class="label">Overall</th>
+          </tr></thead>
+          <tbody id="matrix-body"></tbody>
+        </table>
+      </div>
+      <div class="domains" id="sheets"></div>
+    </div>
+  </section>
+
+  <footer>
+    <div>Overall status is the worst of SPF, DKIM and DMARC. MX only fails a domain when no MX exists. The tenant comes from Microsoft's public sign-in metadata.</div>
+    <div>Link to a check with <span class="mono">?d=contoso.com,fabrikam.com</span>. Prefer a script? The same checks run as Python and PowerShell in the <a href="https://github.com/Groenkaal/mail-dns-check">mail-dns-check repo</a>.</div>
+  </footer>
+</div>
+
+<script src="checks.js"></script>
+<script>
+(function () {
+  "use strict";
+  var TEMPLATE_URL = "https://raw.githubusercontent.com/Groenkaal/mail-dns-check/main/report-template.html";
+  var CONCURRENCY = 3;
+  var CHECKS = [
+    { key: "mx", name: "MX", sub: "mail routing" },
+    { key: "spf", name: "SPF", sub: "sender policy" },
+    { key: "dkim", name: "DKIM", sub: "signing keys" },
+    { key: "dmarc", name: "DMARC", sub: "domain policy" }
+  ];
+  var LABEL = { pass: "Pass", warn: "Warning", fail: "Fail", info: "Info", pending: "Checking" };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var form = $("form"), ta = $("domains"), statusEl = $("status"), runBtn = $("run"), dlBtn = $("download");
+  var lastReport = null, running = false;
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function pill(s) { return el("span", "pill " + s, LABEL[s] || s); }
+  function slug(d) { return "d-" + d.replace(/[^a-z0-9]+/gi, "-").toLowerCase(); }
+  function setStatus(text, isError) { statusEl.textContent = text; statusEl.classList.toggle("error", !!isError); }
+
+  // ------------------------------------------------------------ rendering
+  function renderRow(d) {
+    var tr = el("tr");
+    tr.dataset.overall = d.overall || "pending";
+    var td = el("td", "dom"), a = el("a", null, d.domain);
+    a.href = "#" + slug(d.domain); td.appendChild(a); tr.appendChild(td);
+    CHECKS.forEach(function (c) {
+      var cell = el("td"), chk = d.checks && d.checks[c.key];
+      cell.appendChild(pill(chk ? chk.status : "pending")); tr.appendChild(cell);
+    });
+    var ov = el("td"); ov.appendChild(pill(d.overall || "pending")); tr.appendChild(ov);
+    return tr;
+  }
+
+  function renderSheet(d) {
+    var art = el("article", "domain");
+    art.id = slug(d.domain);
+    art.dataset.overall = d.overall || "pending";
+    var hd = el("header"), title = el("div", "dom-title");
+    title.appendChild(el("h2", null, d.domain));
+    if (d.tenant) title.appendChild(el("div", "tenant", d.tenant.found
+      ? "Microsoft 365 tenant " + d.tenant.id + (d.tenant.region ? " · region " + d.tenant.region : "")
+      : "No Microsoft 365 tenant for this domain"));
+    hd.appendChild(title); hd.appendChild(pill(d.overall || "pending")); art.appendChild(hd);
+    if (!d.checks) return art;
+
+    var grid = el("div", "checks");
+    CHECKS.forEach(function (c) {
+      var chk = d.checks[c.key];
+      var box = el("section", "check"), h = el("div", "check-head"), h3 = el("h3", null, c.name);
+      h3.appendChild(el("small", null, c.sub)); h.appendChild(h3); h.appendChild(pill(chk.status)); box.appendChild(h);
+      box.appendChild(el("p", "summary", chk.summary));
+      if (chk.records.length) {
+        var ul = el("ul", "records");
+        chk.records.forEach(function (r) {
+          var li = el("li");
+          if (r && typeof r === "object") { if (r.host) li.appendChild(el("span", "host", r.host)); li.appendChild(document.createTextNode(r.value || "")); }
+          else li.textContent = String(r);
+          ul.appendChild(li);
+        });
+        box.appendChild(ul);
+      } else box.appendChild(el("p", "empty", "No record found"));
+      if (chk.findings.length) {
+        var fl = el("ul", "findings");
+        chk.findings.forEach(function (f) { fl.appendChild(el("li", f.level, f.text)); });
+        box.appendChild(fl);
+      }
+      grid.appendChild(box);
+    });
+    art.appendChild(grid);
+    return art;
+  }
+
+  function renderTally(results) {
+    var counts = { pass: 0, warn: 0, fail: 0 };
+    results.forEach(function (d) { if (d && counts[d.overall] != null) counts[d.overall]++; });
+    var t = $("tally"); t.textContent = "";
+    [["pass", "fully configured"], ["warn", "with warnings"], ["fail", "failing"]].forEach(function (x) {
+      var box = el("div", "t-" + x[0]);
+      box.appendChild(el("strong", null, String(counts[x[0]])));
+      box.appendChild(el("span", "label", x[1]));
+      t.appendChild(box);
+    });
+  }
+
+  function showResults(domains) {
+    $("intro").hidden = true;
+    $("results").hidden = false;
+    var tbody = $("matrix-body"), sheets = $("sheets");
+    tbody.textContent = ""; sheets.textContent = "";
+    var rows = [], arts = [];
+    domains.forEach(function (d) {
+      var r = renderRow(d), a = renderSheet(d);
+      rows.push(r); arts.push(a); tbody.appendChild(r); sheets.appendChild(a);
+    });
+    return { rows: rows, arts: arts };
+  }
+
+  // ------------------------------------------------------------ run
+  async function run(domains) {
+    if (running) return;
+    running = true; runBtn.disabled = true; dlBtn.disabled = true;
+    $("notice").hidden = true;
+    var q = MailDnsChecks.createResolver();
+    var results = new Array(domains.length), done = 0;
+    var view = showResults(domains.map(function (d) { return { domain: d }; }));
+    renderTally(results);
+    setStatus("Checking 0 of " + domains.length + " …");
+
+    var next = 0;
+    async function worker() {
+      while (next < domains.length) {
+        var i = next++;
+        var r = await MailDnsChecks.checkDomain(q, domains[i]);
+        results[i] = r;
+        var row = renderRow(r), art = renderSheet(r);
+        view.rows[i].replaceWith(row); view.arts[i].replaceWith(art);
+        view.rows[i] = row; view.arts[i] = art;
+        done++;
+        renderTally(results);
+        setStatus("Checking " + done + " of " + domains.length + " …");
+      }
+    }
+    var workers = [];
+    for (var w = 0; w < Math.min(CONCURRENCY, domains.length); w++) workers.push(worker());
+    await Promise.all(workers);
+
+    lastReport = {
+      generated: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+      tool: "Web (" + location.host + ")",
+      source: "browser",
+      resolver: q.provider() + " (DNS over HTTPS)",
+      domains: results
+    };
+    var errors = results.filter(function (r) {
+      return CHECKS.some(function (c) { return r.checks[c.key].summary === "Lookup error."; });
+    }).length;
+    setStatus("Checked " + domains.length + " domain" + (domains.length === 1 ? "" : "s") + " at " + new Date().toLocaleTimeString() + "." +
+      (errors ? " " + errors + " had lookup errors. Check your connection or ad blocker." : ""), errors > 0);
+    try { history.replaceState(null, "", "?d=" + domains.map(encodeURIComponent).join(",")); } catch (e) {}
+    running = false; runBtn.disabled = false; dlBtn.disabled = false;
+  }
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var domains = MailDnsChecks.parseDomainList(ta.value);
+    if (!domains.length) { setStatus("Enter at least one domain, for example contoso.com.", true); ta.focus(); return; }
+    run(domains);
+  });
+
+  $("file").addEventListener("change", function (e) {
+    var f = e.target.files && e.target.files[0];
+    if (!f) return;
+    f.text().then(function (text) {
+      var domains = MailDnsChecks.parseDomainList(text);
+      ta.value = domains.join("\n");
+      setStatus(domains.length ? "Loaded " + domains.length + " domains from " + f.name + "." : f.name + " has no domains in it.", !domains.length);
+      e.target.value = "";
+    });
+  });
+
+  // ------------------------------------------------------------ filter + download
+  function setFilter(issues) {
+    document.body.classList.toggle("only-issues", issues);
+    $("f-all").setAttribute("aria-pressed", String(!issues));
+    $("f-issues").setAttribute("aria-pressed", String(issues));
+  }
+  $("f-all").addEventListener("click", function () { setFilter(false); });
+  $("f-issues").addEventListener("click", function () { setFilter(true); });
+
+  dlBtn.addEventListener("click", async function () {
+    if (!lastReport) return;
+    dlBtn.disabled = true;
+    setStatus("Preparing report …");
+    try {
+      var res = await fetch(TEMPLATE_URL);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      var tpl = await res.text();
+      var html = tpl.replace("__REPORT_DATA__", function () { return JSON.stringify(lastReport).replace(/<\//g, "<\\/"); });
+      var blob = new Blob([html], { type: "text/html" });
+      var a = document.createElement("a");
+      var stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
+      a.href = URL.createObjectURL(blob);
+      a.download = "mail-dns-report-" + stamp + ".html";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+      setStatus("Saved " + a.download + ".");
+    } catch (e) {
+      setStatus("Could not download the report template from GitHub (" + e.message + "). Try again in a moment.", true);
+    }
+    dlBtn.disabled = false;
+  });
+
+  // ------------------------------------------------------------ start
+  if (window.MAILDNS_SAMPLE) {
+    var s = window.MAILDNS_SAMPLE;
+    ta.value = s.domains.map(function (d) { return d.domain; }).join("\n");
+    var v = showResults(s.domains);
+    renderTally(s.domains);
+    lastReport = s;
+    dlBtn.disabled = false;
+    $("notice").textContent = "These are sample results from a saved run. This preview can't make live DNS lookups. Use the GitHub Pages version to check domains live.";
+    $("notice").hidden = false;
+    return;
+  }
+  var params = new URLSearchParams(location.search);
+  var preset = MailDnsChecks.parseDomainList((params.get("d") || params.get("domains") || "").replace(/,/g, "\n"));
+  if (preset.length) { ta.value = preset.join("\n"); run(preset); }
+  else ta.value = "microsoft.com\ngithub.com";
+})();
+</script>
+</body>
+</html>
